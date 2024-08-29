@@ -124,12 +124,9 @@ class MyServer(ServerStuff):
 
         self._managers = set()
 
-    def register(self, c, typeid, address, callback):
-        if not hasattr(callback, "_mpc"):
-            raise TypeError(f"Callback {callback!r} is not MultiprocessCallback")
-        callback.address = address
-        callback._authkey = self._authkey  # remote will have the same authkey as we do
-        self.registry[typeid] = callback
+    def register(self, c, name, address):
+        print("register", name, address)
+        self.registry[name] = address
 
     def register_manager(self, c, address):
         self._managers.add(address)
@@ -146,18 +143,23 @@ class MyServer(ServerStuff):
         finally:
             self.stop_event.set()
 
-    def call(self, c, typeid, /, *args, **kwds) -> tuple[Any, bool]:
-        if typeid not in self.registry:
+    def call(self, c, name, /, *args, **kwds) -> tuple[Any, bool]:
+        print("call", name, args, kwds, self.registry)
+        if name not in self.registry:
             return None, False
-        mpc = self.registry[typeid]
-        if not hasattr(mpc, "_mpc"):
-            raise TypeError(f"Callback {mpc!r} is not MultiprocessCallback")
+        address = self.registry[name]
+        conn = None
         try:
-            value = mpc.call(*args, **kwds)
-        except Exception:
+            conn = connection.Client(address, authkey=self._authkey)
+            return dispatch(conn, None, "call2", (name, *args), kwds), True
+        except Exception as e:
+            print("Exception", e)
             # mpc is broken. Remove it.
-            del self.registry[typeid]
+            del self.registry[name]
             return None, False
+        finally:
+            if conn:
+                conn.close()
         return value, True
 
 
@@ -188,10 +190,6 @@ class MultiprocessCallback:
                 return dispatch(conn, None, "call2", (self.name, *args), kwds)
             finally:
                 conn.close()
-
-
-class EndListener(Exception):
-    pass
 
 
 class MyManager(ServerStuff):
@@ -345,10 +343,9 @@ class MyManager(ServerStuff):
         # Register on the local
         self.registry[name] = callable
         # Register on the remote
-        mpc = MultiprocessCallback(name, callable)
         conn = self._Client(self._address, authkey=self._authkey)
         try:
-            dispatch(conn, None, "register", (name, self._man_address, mpc))
+            dispatch(conn, None, "register", (name, self._man_address))
         finally:
             conn.close()
 
@@ -431,6 +428,6 @@ if __name__ == "__main__":
                 logging.info(f"callback returned: {value}")
             else:
                 logging.warning("callback not found")
-            time.sleep(0.01)
+            time.sleep(0.2)
     except KeyboardInterrupt:
         pass
