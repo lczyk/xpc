@@ -1,0 +1,82 @@
+[tool.mypy]
+ignore_missing_imports = true
+follow_imports = "normal"
+
+namespace_packages = true
+disallow_untyped_defs = true
+# disallow_any_unimported = true
+# disallow_any_generics = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = true
+warn_unused_configs = true
+explicit_package_bases = true
+enable_error_code = "explicit-override"
+extra_checks = true
+local_partial_types = true
+
+
+files = [
+    "./src/**/*.py",
+    "./tests/**/*.py",
+    # "./example/**/*.py",
+    #
+]
+
+[tool.ruff]
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    ".env",
+    ".eggs",
+    "*.egg",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".vscode",
+    "*-env",
+]
+line-length = 120
+lint.ignore = [
+    "E731",
+    "SIM105",
+    "PLR0911", # too many return statements
+    "PLR0912", # too many branches
+    "PLR0913", # too many arguments in function definition
+    "PLR2004", # magic values
+    #
+]
+lint.select = [
+    "E",    # pycodestyle
+    "F",    # Pyflakes
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "W",    # warnings
+    "UP",   # pyupgrade
+    "I",    # isort
+    "Q",    # flake8-quotes
+    "RUF",  # ruff
+    "TID",  # flake8-tidy-imports
+    "PERF", # perflint
+    "FURB", # refurb
+    "PL",   # pylint
+    #
+]
+
+output-format = "concise"
+
+[tool.black]
+line-length = 120
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = [
+    "-s",
+    "--tb=short",
+    "--color=yes",
+    # "--doctest-modules",
+    #
+]
