@@ -54,8 +54,8 @@ class ServerStuff:
     def _handle_request(self, c):
         request = None
         try:
-            connection.deliver_challenge(c, self.authkey)
-            connection.answer_challenge(c, self.authkey)
+            connection.deliver_challenge(c, self._authkey)
+            connection.answer_challenge(c, self._authkey)
             request = c.recv()
             ignore, funcname, args, kwds = request
             assert funcname in self.public, f"{funcname!r} unrecognized"
@@ -115,7 +115,7 @@ class MyServer(ServerStuff):
             raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
 
         self.registry = {}
-        self.authkey = process.AuthenticationString(authkey)
+        self._authkey = process.AuthenticationString(authkey)
         Listener, _Client = connection.Listener, connection.Client
 
         # do authentication later
@@ -128,7 +128,7 @@ class MyServer(ServerStuff):
         if not hasattr(callback, "_mpc"):
             raise TypeError(f"Callback {callback!r} is not MultiprocessCallback")
         callback.address = address
-        callback.authkey = self.authkey  # remote will have the same authkey as we do
+        callback._authkey = self._authkey  # remote will have the same authkey as we do
         self.registry[typeid] = callback
 
     def register_manager(self, c, address):
@@ -171,7 +171,7 @@ class MultiprocessCallback:
         self.name = name
         self.callback = callback
         self.address = None
-        self.authkey = None
+        self._authkey = None
 
     def __reduce__(self) -> str | tuple[Any, ...]:
         """Dont pickle the callback. We won't need it on the other side."""
@@ -183,7 +183,7 @@ class MultiprocessCallback:
             return self.callback(*args, **kwds)
         else:
             # We're on the remote. We need to call back to the originator.
-            conn = connection.Client(self.address, authkey=self.authkey)
+            conn = connection.Client(self.address, authkey=self._authkey)
             try:
                 return dispatch(conn, None, "call2", (self.name, *args), kwds)
             finally:
@@ -201,8 +201,6 @@ class MyManager(ServerStuff):
     _raise_exceptions = True
 
     def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
-        if authkey is None:
-            authkey = process.current_process().authkey
         self._address = address  # XXX not final address if eg ('', 0)
         self._authkey = process.AuthenticationString(authkey)
         self._state = State()
@@ -369,23 +367,6 @@ class MyManager(ServerStuff):
 
     ############################################################################################################
 
-    # def serve(self):
-    #     self.stop_event = threading.Event()
-    #     process.current_process()._manager_server = self
-    #     accepter = threading.Thread(target=self.accepter)
-    #     accepter.daemon = True
-    #     accepter.start()
-
-    # def accepter(self):
-    #     while True:
-    #         try:
-    #             c = self.listener.accept()
-    #         except OSError:
-    #             continue
-    #         t = threading.Thread(target=self.handle_request, args=(c,))
-    #         t.daemon = True
-    #         t.start()
-
     def _handle_request(self, c):
         request = None
         try:
@@ -416,16 +397,6 @@ class MyManager(ServerStuff):
             util.info("Failure to send message: %r", msg)
             util.info(" ... request was %r", request)
             util.info(" ... exception was %r", e)
-
-    # def handle_request(self, conn):
-    #     """Handle a new connection"""
-    #     try:
-    #         self._handle_request(conn)
-    #     except SystemExit:
-    #         # Server.serve_client() calls sys.exit(0) on EOF
-    #         pass
-    #     finally:
-    #         conn.close()
 
 
 if __name__ == "__main__":
