@@ -6,23 +6,25 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from multiprocessing import connection, process, util
+from multiprocessing.context import ProcessError
 from multiprocessing.managers import (
     State,
     dispatch,
     get_context,
 )
-from traceback import format_exc
+from multiprocessing.process import AuthenticationString
 from typing import Any, Callable
 
 
 class ServerStuff:
-    _raise_exceptions = False
+    _authkey: bytes
 
-    def serve(self, forever=True):
+    def serve(self, forever: bool = True) -> None:
         """Run the server forever"""
         self.stop_event = threading.Event()
-        process.current_process()._manager_server = self
+        process.current_process()._manager_server = self  # type: ignore
         try:
             accepter = threading.Thread(target=self.accepter)
             accepter.daemon = True
@@ -41,7 +43,7 @@ class ServerStuff:
                     sys.stderr = sys.__stderr__
                 sys.exit(0)
 
-    def accepter(self):
+    def accepter(self) -> None:
         while True:
             try:
                 c = self.listener.accept()
@@ -51,7 +53,7 @@ class ServerStuff:
             t.daemon = True
             t.start()
 
-    def _handle_request(self, c):
+    def _handle_request(self, c: connection.Connection) -> None:
         request = None
         try:
             connection.deliver_challenge(c, self._authkey)
@@ -61,14 +63,12 @@ class ServerStuff:
             assert funcname in self.public, f"{funcname!r} unrecognized"
             func = getattr(self, funcname)
         except Exception:
-            msg = ("#TRACEBACK", format_exc())
+            msg = ("#TRACEBACK", traceback.format_exc())
         else:
             try:
                 result = func(c, *args, **kwds)
             except Exception:
-                if self._raise_exceptions:
-                    raise
-                msg = ("#TRACEBACK", format_exc())
+                msg = ("#TRACEBACK", traceback.format_exc())
             else:
                 msg = ("#RETURN", result)
 
@@ -76,14 +76,14 @@ class ServerStuff:
             c.send(msg)
         except Exception as e:
             try:
-                c.send(("#TRACEBACK", format_exc()))
+                c.send(("#TRACEBACK", traceback.format_exc()))
             except Exception:
                 pass
             util.info("Failure to send message: %r", msg)
             util.info(" ... request was %r", request)
             util.info(" ... exception was %r", e)
 
-    def handle_request(self, conn):
+    def handle_request(self, conn: connection.Connection) -> None:
         """Handle a new connection"""
         try:
             self._handle_request(conn)
@@ -99,52 +99,47 @@ class MyServer(ServerStuff):
     Server class which runs in a process controlled by a manager object
     """
 
-    public = [
+    public = (
         "shutdown",
         "create",
         "has_callback",
         "register",
         "call",
-        "register_manager",
-    ]
+        "dummy",
+    )
 
-    _raise_exceptions = False
-
-    def __init__(self, address, authkey):
+    def __init__(self, address: tuple[str, int] | str | None = None, authkey: bytes | str = b""):
         if not isinstance(authkey, bytes):
             raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
 
-        self.registry = {}
-        self._authkey = process.AuthenticationString(authkey)
+        self.registry: dict[str, str] = {}
+        self._authkey = AuthenticationString(authkey)
         Listener, _Client = connection.Listener, connection.Client
 
         # do authentication later
         self.listener = Listener(address=address, backlog=128)
         self.address = self.listener.address
 
-        self._managers = set()
+    def dummy(self, c: connection.Connection) -> None:
+        pass
 
-    def register(self, c, name, address):
-        print("register", name, address)
+    def register(self, c: connection.Connection, name: str, address: str) -> None:
         self.registry[name] = address
 
-    def register_manager(self, c, address):
-        self._managers.add(address)
-
-    def shutdown(self, c):
+    def shutdown(self, c: connection.Connection) -> None:
         """Shutdown this process"""
         try:
             util.debug("manager received shutdown message")
             c.send(("#RETURN", None))
-        except:
+        except BaseException:
             import traceback
 
             traceback.print_exc()
         finally:
             self.stop_event.set()
 
-    def call(self, c, name, /, *args, **kwds) -> tuple[Any, bool]:
-        print("call", name, args, kwds, self.registry)
+    def call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+        # print("call", name, args, kwds, self.registry)
         if name not in self.registry:
             return None, False
         address = self.registry[name]
@@ -153,50 +148,21 @@ class MyServer(ServerStuff):
             conn = connection.Client(address, authkey=self._authkey)
             return dispatch(conn, None, "call2", (name, *args), kwds), True
         except Exception as e:
-            print("Exception", e)
+            print(f"Error calling {name}: {e}")
             # mpc is broken. Remove it.
             del self.registry[name]
             return None, False
         finally:
             if conn:
                 conn.close()
-        return value, True
 
 
 ########################################################################################
 
 
-class MultiprocessCallback:
-    _mpc = True
-
-    def __init__(self, name, callback):
-        self.name = name
-        self.callback = callback
-        self.address = None
-        self._authkey = None
-
-    def __reduce__(self) -> str | tuple[Any, ...]:
-        """Dont pickle the callback. We won't need it on the other side."""
-        return (MultiprocessCallback, (self.name, None))
-
-    def call(self, /, *args, **kwds):
-        if self.callback:
-            # We have the callback. Jsut call it.
-            return self.callback(*args, **kwds)
-        else:
-            # We're on the remote. We need to call back to the originator.
-            conn = connection.Client(self.address, authkey=self._authkey)
-            try:
-                return dispatch(conn, None, "call2", (self.name, *args), kwds)
-            finally:
-                conn.close()
-
-
 class MyManager(ServerStuff):
     _Server = MyServer
-    public = ["call2"]
-
-    _raise_exceptions = True
+    public = "call2"
 
     def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
         self._address = address  # XXX not final address if eg ('', 0)
@@ -213,20 +179,7 @@ class MyManager(ServerStuff):
 
         self.registry = {}
 
-    def get_server(self):
-        """
-        Return server object with serve_forever() method and address attribute
-        """
-        if self._state.value != State.INITIAL:
-            if self._state.value == State.STARTED:
-                raise ProcessError("Already started server")
-            elif self._state.value == State.SHUTDOWN:
-                raise ProcessError("Manager has shut down")
-            else:
-                raise ProcessError(f"Unknown state {self._state.value!r}")
-        return Server(self._address, self._authkey)
-
-    def connect(self):
+    def connect(self) -> None:
         """
         Connect manager object to the server process
         """
@@ -235,11 +188,11 @@ class MyManager(ServerStuff):
         self._state.value = State.STARTED
 
         try:
-            dispatch(conn, None, "register_manager", (self._man_address,))
+            dispatch(conn, None, "dummy")
         finally:
             conn.close()
 
-    def start(self, initializer=None, initargs=()):
+    def start(self, initializer: Callable | None = None, initargs: tuple = ()) -> None:
         """Spawn a server process for this manager object"""
         if self._state.value != State.INITIAL:
             if self._state.value == State.STARTED:
@@ -279,7 +232,14 @@ class MyManager(ServerStuff):
         )
 
     @classmethod
-    def _run_server(cls, address, authkey, writer, initializer=None, initargs=()):
+    def _run_server(
+        cls,
+        address: tuple[str, int] | str | None,
+        authkey: bytes,
+        writer: connection.Connection,
+        initializer: Callable | None = None,
+        initargs: tuple = (),
+    ):
         """Create a server, report its address and run it"""
         # bpo-36368: protect server process from KeyboardInterrupt signals
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -349,7 +309,7 @@ class MyManager(ServerStuff):
         finally:
             conn.close()
 
-    def call(self, name, /, *args, **kwds) -> tuple[Any, bool]:
+    def call(self, name: str, /, *args, **kwds) -> tuple[Any, bool]:
         assert self._state.value == State.STARTED, "server not yet started"
         conn = self._Client(self._address, authkey=self._authkey)
         try:
@@ -357,43 +317,10 @@ class MyManager(ServerStuff):
         finally:
             conn.close()
 
-    def call2(self, c, name, /, *args, **kwds):
+    def call2(self, c: connection.Connection, name: str, /, *args, **kwds):
         if name not in self.registry:
             raise ValueError(f"Callback {name!r} not found")
         return self.registry[name](*args, **kwds)
-
-    ############################################################################################################
-
-    def _handle_request(self, c):
-        request = None
-        try:
-            connection.deliver_challenge(c, self._authkey)
-            connection.answer_challenge(c, self._authkey)
-            request = c.recv()
-            ignore, funcname, args, kwds = request
-            assert funcname in self.public, f"{funcname!r} unrecognized"
-            func = getattr(self, funcname)
-        except Exception:
-            msg = ("#TRACEBACK", format_exc())
-        else:
-            try:
-                result = func(c, *args, **kwds)
-            except Exception:
-                # NOTE: We purposefully don't send the exception back to the client
-                raise
-            else:
-                msg = ("#RETURN", result)
-
-        try:
-            c.send(msg)
-        except Exception as e:
-            try:
-                c.send(("#TRACEBACK", format_exc()))
-            except Exception:
-                pass
-            util.info("Failure to send message: %r", msg)
-            util.info(" ... request was %r", request)
-            util.info(" ... exception was %r", e)
 
 
 if __name__ == "__main__":
