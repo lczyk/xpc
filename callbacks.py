@@ -1,10 +1,7 @@
-# def my_callback():
-#     print("my_callback called with args:", args, "kwargs:", kwargs)
-#     return 100001
-
+import time
 from typing import Any
 
-from temp1 import MyManager
+from server import MyManager
 
 if __name__ == "__main__":
     manager = MyManager(
@@ -14,13 +11,15 @@ if __name__ == "__main__":
     manager.connect()
 
     def my_callback(*args: Any, **kwargs: Any) -> int:
+        # def my_callback() -> int:
         print("my_callback called with args:", args, "kwargs:", kwargs)
+        # time.sleep(0.1)
+        # raise ValueError("This is a test error")
         return 100001
 
-    manager.register_callback("my_callback", my_callback)
+    manager.register("my_callback", my_callback)
 
-    import time
-
+    # Spin
     try:
         while True:
             print(".", end="", flush=True)

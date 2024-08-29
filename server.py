@@ -9,45 +9,17 @@ import time
 from multiprocessing import connection, process, util
 from multiprocessing.managers import (
     State,
-    Token,
     dispatch,
     get_context,
 )
 from traceback import format_exc
-from typing import Any
-
-_missing = object()
+from typing import Any, Callable
 
 
-class MyServer:
-    """
-    Server class which runs in a process controlled by a manager object
-    """
+class ServerStuff:
+    _raise_exceptions = False
 
-    public = [
-        "shutdown",
-        "create",
-        "has_callback",
-        "register",
-        "call",
-        "register_manager",
-    ]
-
-    def __init__(self, address, authkey):
-        if not isinstance(authkey, bytes):
-            raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
-
-        self.registry = {}
-        self.authkey = process.AuthenticationString(authkey)
-        Listener, _Client = connection.Listener, connection.Client
-
-        # do authentication later
-        self.listener = Listener(address=address, backlog=128)
-        self.address = self.listener.address
-
-        self._managers = set()
-
-    def serve_forever(self):
+    def serve(self, forever=True):
         """Run the server forever"""
         self.stop_event = threading.Event()
         process.current_process()._manager_server = self
@@ -55,17 +27,19 @@ class MyServer:
             accepter = threading.Thread(target=self.accepter)
             accepter.daemon = True
             accepter.start()
-            try:
-                while not self.stop_event.is_set():
-                    self.stop_event.wait(1)
-            except (KeyboardInterrupt, SystemExit):
-                pass
+            if forever:
+                try:
+                    while not self.stop_event.is_set():
+                        self.stop_event.wait(1)
+                except (KeyboardInterrupt, SystemExit):
+                    pass
         finally:
-            if sys.stdout != sys.__stdout__:  # what about stderr?
-                util.debug("resetting stdout, stderr")
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-            sys.exit(0)
+            if forever:
+                if sys.stdout != sys.__stdout__:  # what about stderr?
+                    util.debug("resetting stdout, stderr")
+                    sys.stdout = sys.__stdout__
+                    sys.stderr = sys.__stderr__
+                sys.exit(0)
 
     def accepter(self):
         while True:
@@ -92,6 +66,8 @@ class MyServer:
             try:
                 result = func(c, *args, **kwds)
             except Exception:
+                if self._raise_exceptions:
+                    raise
                 msg = ("#TRACEBACK", format_exc())
             else:
                 msg = ("#RETURN", result)
@@ -117,6 +93,37 @@ class MyServer:
         finally:
             conn.close()
 
+
+class MyServer(ServerStuff):
+    """
+    Server class which runs in a process controlled by a manager object
+    """
+
+    public = [
+        "shutdown",
+        "create",
+        "has_callback",
+        "register",
+        "call",
+        "register_manager",
+    ]
+
+    _raise_exceptions = False
+
+    def __init__(self, address, authkey):
+        if not isinstance(authkey, bytes):
+            raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
+
+        self.registry = {}
+        self.authkey = process.AuthenticationString(authkey)
+        Listener, _Client = connection.Listener, connection.Client
+
+        # do authentication later
+        self.listener = Listener(address=address, backlog=128)
+        self.address = self.listener.address
+
+        self._managers = set()
+
     def register(self, c, typeid, address, callback):
         if not hasattr(callback, "_mpc"):
             raise TypeError(f"Callback {callback!r} is not MultiprocessCallback")
@@ -126,17 +133,6 @@ class MyServer:
 
     def register_manager(self, c, address):
         self._managers.add(address)
-
-    # def fallback_getvalue(self, conn, ident, obj):
-    #     return obj
-
-    # def fallback_str(self, conn, ident, obj):
-    #     return str(obj)
-
-    # def fallback_repr(self, conn, ident, obj):
-    #     return repr(obj)
-
-    # fallback_mapping = {"__str__": fallback_str, "__repr__": fallback_repr, "#GETVALUE": fallback_getvalue}
 
     def shutdown(self, c):
         """Shutdown this process"""
@@ -198,9 +194,11 @@ class EndListener(Exception):
     pass
 
 
-class MyManager:
+class MyManager(ServerStuff):
     _Server = MyServer
     public = ["call2"]
+
+    _raise_exceptions = True
 
     def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
         if authkey is None:
@@ -236,7 +234,7 @@ class MyManager:
         """
         Connect manager object to the server process
         """
-        self.serve()
+        self.serve(forever=False)
         conn = connection.Client(self._address, authkey=self._authkey)
         self._state.value = State.STARTED
 
@@ -246,21 +244,6 @@ class MyManager:
             conn.close()
 
     def start(self, initializer=None, initargs=()):
-        address = self._start(
-            self.address,
-            self._authkey,
-            initializer,
-            initargs,
-        )
-        self._address = address
-
-    def _start(
-        self,
-        address,
-        authkey,
-        initializer=None,
-        initargs=(),
-    ):
         """Spawn a server process for this manager object"""
         if self._state.value != State.INITIAL:
             if self._state.value == State.STARTED:
@@ -279,7 +262,7 @@ class MyManager:
         # spawn process which runs a server
         self._process = self._ctx.Process(
             target=type(self)._run_server,
-            args=(address, authkey, writer, initializer, initargs),
+            args=(self.address, self._authkey, writer, initializer, initargs),
         )
         ident = ":".join(str(i) for i in self._process._identity)
         self._process.name = type(self).__name__ + "-" + ident
@@ -287,7 +270,7 @@ class MyManager:
 
         # get address of server
         writer.close()
-        address = reader.recv()
+        self._address = reader.recv()
         reader.close()
 
         # register a finalizer
@@ -295,11 +278,9 @@ class MyManager:
         self.shutdown = util.Finalize(
             self,
             type(self)._finalize_manager,
-            args=(self._process, address, authkey, self._state, self._Client, self._shutdown_timeout),
+            args=(self._process, self.address, self._authkey, self._state, self._Client, self._shutdown_timeout),
             exitpriority=0,
         )
-
-        return address
 
     @classmethod
     def _run_server(cls, address, authkey, writer, initializer=None, initargs=()):
@@ -319,7 +300,7 @@ class MyManager:
 
         # run the manager
         util.info("manager serving at %r", server.address)
-        server.serve_forever()
+        server.serve(forever=True)
 
     def join(self, timeout=None):
         """Join the manager process (if it has been spawned)"""
@@ -360,25 +341,24 @@ class MyManager:
     def address(self):
         return self._address
 
-    def register_callback(self, typeid, callable):
+    def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
         assert self._state.value == State.STARTED, "server not yet started"
         # Register on the local
-        self.registry[typeid] = callable
+        self.registry[name] = callable
         # Register on the remote
-        mpc = MultiprocessCallback(typeid, callable)
+        mpc = MultiprocessCallback(name, callable)
         conn = self._Client(self._address, authkey=self._authkey)
         try:
-            id = dispatch(conn, None, "register", (typeid, self._man_address, mpc))
+            dispatch(conn, None, "register", (name, self._man_address, mpc))
         finally:
             conn.close()
-        return Token(typeid, self._address, id)
 
-    def call(self, typeid, /, *args, **kwds) -> tuple[Any, bool]:
+    def call(self, name, /, *args, **kwds) -> tuple[Any, bool]:
         assert self._state.value == State.STARTED, "server not yet started"
         conn = self._Client(self._address, authkey=self._authkey)
         try:
-            return dispatch(conn, None, "call", (typeid, *args), kwds)
+            return dispatch(conn, None, "call", (name, *args), kwds)
         finally:
             conn.close()
 
@@ -387,44 +367,24 @@ class MyManager:
             raise ValueError(f"Callback {name!r} not found")
         return self.registry[name](*args, **kwds)
 
-    def _create(self, typeid, /, *args, **kwds):
-        """
-        Create a new shared object; return the token and exposed tuple
-        """
-        assert self._state.value == State.STARTED, "server not yet started"
-        conn = self._Client(self._address, authkey=self._authkey)
-        try:
-            id, exposed = dispatch(conn, None, "create", (typeid, *args), kwds)
-        finally:
-            conn.close()
-        token = Token(typeid, self._address, id), exposed
-        return token
-
-    # def listen(self):
-    #     """Listen for callbacks"""
-    #     while True:
-    #         data = self._reader.recv()
-    #         if isinstance(data, EndListener):
-    #             break
-
     ############################################################################################################
 
-    def serve(self):
-        self.stop_event = threading.Event()
-        process.current_process()._manager_server = self
-        accepter = threading.Thread(target=self.accepter)
-        accepter.daemon = True
-        accepter.start()
+    # def serve(self):
+    #     self.stop_event = threading.Event()
+    #     process.current_process()._manager_server = self
+    #     accepter = threading.Thread(target=self.accepter)
+    #     accepter.daemon = True
+    #     accepter.start()
 
-    def accepter(self):
-        while True:
-            try:
-                c = self.listener.accept()
-            except OSError:
-                continue
-            t = threading.Thread(target=self.handle_request, args=(c,))
-            t.daemon = True
-            t.start()
+    # def accepter(self):
+    #     while True:
+    #         try:
+    #             c = self.listener.accept()
+    #         except OSError:
+    #             continue
+    #         t = threading.Thread(target=self.handle_request, args=(c,))
+    #         t.daemon = True
+    #         t.start()
 
     def _handle_request(self, c):
         request = None
@@ -457,25 +417,30 @@ class MyManager:
             util.info(" ... request was %r", request)
             util.info(" ... exception was %r", e)
 
-    def handle_request(self, conn):
-        """Handle a new connection"""
-        try:
-            self._handle_request(conn)
-        except SystemExit:
-            # Server.serve_client() calls sys.exit(0) on EOF
-            pass
-        finally:
-            conn.close()
+    # def handle_request(self, conn):
+    #     """Handle a new connection"""
+    #     try:
+    #         self._handle_request(conn)
+    #     except SystemExit:
+    #         # Server.serve_client() calls sys.exit(0) on EOF
+    #         pass
+    #     finally:
+    #         conn.close()
 
 
 if __name__ == "__main__":
     import logging
 
-    import colorlog
+    try:
+        import colorlog
 
-    handler = colorlog.StreamHandler()
-    # Add date to the log format
-    handler.setFormatter(colorlog.ColoredFormatter("%(asctime)s %(log_color)s%(levelname)s%(reset)s %(message)s"))
+        handler = colorlog.StreamHandler()
+        # Add date to the log format
+        handler.setFormatter(colorlog.ColoredFormatter("%(asctime)s %(log_color)s%(levelname)s%(reset)s %(message)s"))
+    except ImportError:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+
     logging.basicConfig(level=logging.INFO, handlers=[handler])
 
     manager = MyManager(
