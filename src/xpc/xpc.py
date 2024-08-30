@@ -1,11 +1,12 @@
-# We want to start the app with the `python -m app.server --mode mock` command
-# Before that we want to register a cross-process callback which will be called periodically by the app
-# We can't modify the app code
+"""
+We want to start the app with the `python -m app.server --mode mock` command
+Before that we want to register a cross-process callback which will be called periodically by the app
+We can't modify the app code
+"""
 
 import signal
 import sys
 import threading
-import time
 import traceback
 from multiprocessing import connection, process, util
 from multiprocessing.context import ProcessError
@@ -16,6 +17,10 @@ from multiprocessing.managers import (
 )
 from multiprocessing.process import AuthenticationString
 from typing import Any, Callable
+
+__version__ = "0.1.0"
+
+__all__ = ["Manager"]
 
 
 class ServerStuff:
@@ -94,7 +99,7 @@ class ServerStuff:
             conn.close()
 
 
-class MyServer(ServerStuff):
+class Server(ServerStuff):
     """
     Server class which runs in a process controlled by a manager object
     """
@@ -157,11 +162,8 @@ class MyServer(ServerStuff):
                 conn.close()
 
 
-########################################################################################
-
-
-class MyManager(ServerStuff):
-    _Server = MyServer
+class Manager(ServerStuff):
+    _Server = Server
     public = "call2"
 
     def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
@@ -323,38 +325,33 @@ class MyManager(ServerStuff):
         return self.registry[name](*args, **kwds)
 
 
-if __name__ == "__main__":
-    import logging
+__license__ = """
+Copyright 2024 Marcin Konowalczyk
 
-    try:
-        import colorlog
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
 
-        handler = colorlog.StreamHandler()
-        # Add date to the log format
-        handler.setFormatter(colorlog.ColoredFormatter("%(asctime)s %(log_color)s%(levelname)s%(reset)s %(message)s"))
-    except ImportError:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+1.  Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
 
-    logging.basicConfig(level=logging.INFO, handlers=[handler])
+2.  Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
 
-    manager = MyManager(
-        address=("localhost", 50000),
-        authkey=b"password",
-    )
-    manager.start()
+3.  Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
 
-    try:
-        while True:
-            name = "my_callback"
-            args = (1, 2, 3)
-            kwargs = {"hello": "world"}
-            logging.info(f"calling '{name}' with args: {args} and kwargs: {kwargs}")
-            value, found = manager.call(name, *args, **kwargs)
-            if found:
-                logging.info(f"callback returned: {value}")
-            else:
-                logging.warning("callback not found")
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        pass
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"""

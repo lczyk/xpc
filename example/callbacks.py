@@ -1,10 +1,16 @@
+import sys
 import time
+from pathlib import Path
+
+__project_root__ = Path(__file__).resolve().parents[1]
+sys.path.append(str(__project_root__ / "src"))
+
 from typing import Any
 
-from server import MyManager
+from xpc import Manager
 
 if __name__ == "__main__":
-    manager = MyManager(
+    manager = Manager(
         address=("localhost", 50000),
         authkey=b"password",
     )
@@ -12,10 +18,10 @@ if __name__ == "__main__":
 
     def my_callback(*args: Any, **kwargs: Any) -> int:
         # def my_callback() -> int:
-        print("my_callback called with args:", args, "kwargs:", kwargs)
-        # time.sleep(0.1)
+        print("my_callh args:", args, "kwargs:", kwargs)
+        time.sleep(1)
         # raise ValueError("This is a test error")
-        return 100001
+        return 1016969
 
     manager.register("my_callback", my_callback)
 
