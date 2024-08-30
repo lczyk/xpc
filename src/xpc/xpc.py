@@ -9,14 +9,13 @@ import sys
 import threading
 import traceback
 from multiprocessing import connection, process, util
-from multiprocessing.context import BaseContext, ProcessError
+from multiprocessing.context import BaseContext
 from multiprocessing.managers import (  # type: ignore
+    BaseManager,
     State,
     dispatch,
     get_context,
 )
-from multiprocessing.managers import BaseManager
-
 from multiprocessing.process import AuthenticationString  # type: ignore
 from typing import Any, Callable, Union
 
@@ -121,7 +120,7 @@ class Server(_Server):
 
     def __init__(
         self,
-        _registry: dict[str, str] = {},  # XXX: unused
+        _registry: dict[str, str] = {},  # noqa: B006, XXX: unused
         address: Union[tuple[str, int], str, None] = None,
         authkey: Union[bytes, str] = b"",
         _serializer: str = "pickle",  # XXX: unused
@@ -146,17 +145,17 @@ class Server(_Server):
     def register(self, c: connection.Connection, name: str, address: str) -> None:
         self.registry[name] = address
 
-    def shutdown(self, c: connection.Connection) -> None:
-        """Shutdown this process"""
-        try:
-            util.debug("manager received shutdown message")
-            c.send(("#RETURN", None))
-        except BaseException:
-            import traceback
+    # def shutdown(self, c: connection.Connection) -> None:
+    #     """Shutdown this process"""
+    #     try:
+    #         util.debug("manager received shutdown message")
+    #         c.send(("#RETURN", None))
+    #     except BaseException:
+    #         import traceback
 
-            traceback.print_exc()
-        finally:
-            self.stop_event.set()
+    #         traceback.print_exc()
+    #     finally:
+    #         self.stop_event.set()
 
     def call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         util.debug(f"Calling {name} with args {args} and kwargs {kwds}")
@@ -177,7 +176,7 @@ class Server(_Server):
                 conn.close()
 
 
-class Manager(_Server):
+class Manager(BaseManager, _Server):
     _Server = Server
     public = ("call2",)
 
@@ -219,121 +218,129 @@ class Manager(_Server):
         finally:
             conn.close()
 
-    def start(
-        self,
-        initializer: Callable | None = None,
-        initargs: tuple = (),
-    ) -> None:
-        """Spawn a server process for this manager object"""
-        if self._state.value != State.INITIAL:
-            if self._state.value == State.STARTED:
-                raise ProcessError("Already started server")
-            elif self._state.value == State.SHUTDOWN:
-                raise ProcessError("Manager has shut down")
-            else:
-                raise ProcessError(f"Unknown state {self._state.value!r}")
+    # def start(
+    #     self,
+    #     initializer: Callable | None = None,
+    #     initargs: tuple = (),
+    # ) -> None:
+    #     """Spawn a server process for this manager object"""
+    #     if self._state.value != State.INITIAL:
+    #         if self._state.value == State.STARTED:
+    #             raise ProcessError("Already started server")
+    #         elif self._state.value == State.SHUTDOWN:
+    #             raise ProcessError("Manager has shut down")
+    #         else:
+    #             raise ProcessError(f"Unknown state {self._state.value!r}")
 
-        if initializer is not None and not callable(initializer):
-            raise TypeError("initializer must be a callable")
+    #     if initializer is not None and not callable(initializer):
+    #         raise TypeError("initializer must be a callable")
 
-        # pipe over which we will retrieve address of server
-        reader, writer = connection.Pipe(duplex=False)
+    #     # pipe over which we will retrieve address of server
+    #     reader, writer = connection.Pipe(duplex=False)
 
-        # spawn process which runs a server
-        self._process = self._ctx.Process(  # type: ignore
-            target=type(self)._run_server,
-            args=(self.address, self._authkey, writer, initializer, initargs),
-        )
-        ident = ":".join(str(i) for i in self._process._identity)
-        self._process.name = type(self).__name__ + "-" + ident
-        self._process.start()
+    #     # spawn process which runs a server
+    #     self._process = self._ctx.Process(  # type: ignore
+    #         target=type(self)._run_server,
+    #         args=(self.address, self._authkey, writer, initializer, initargs),
+    #     )
+    #     ident = ":".join(str(i) for i in self._process._identity)
+    #     self._process.name = type(self).__name__ + "-" + ident
+    #     self._process.start()
 
-        # get address of server
-        writer.close()
-        self._address = reader.recv()
-        reader.close()
+    #     # get address of server
+    #     writer.close()
+    #     self._address = reader.recv()
+    #     reader.close()
 
-        # register a finalizer
-        self._state.value = State.STARTED
-        self.shutdown = util.Finalize(
-            self,
-            type(self)._finalize_manager,
-            args=(self._process, self.address, self._authkey, self._state, self._Client, self._shutdown_timeout),
-            exitpriority=0,
-        )
+    #     # register a finalizer
+    #     self._state.value = State.STARTED
+    #     self.shutdown = util.Finalize(
+    #         self,
+    #         type(self)._finalize_manager,
+    #         args=(self._process, self.address, self._authkey, self._state, self._Client, self._shutdown_timeout),
+    #         exitpriority=0,
+    #     )
 
-    @classmethod
-    def _run_server(
-        cls,
-        address: tuple[str, int] | str | None,
-        authkey: bytes,
-        writer: connection.Connection,
-        initializer: Callable | None = None,
-        initargs: tuple = (),
-    ) -> None:
-        """Create a server, report its address and run it"""
-        # bpo-36368: protect server process from KeyboardInterrupt signals
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    def start(self, initializer=None, initargs=()) -> None:
+        signal.signal(signal.SIGINT, self.on_sigint)
+        super().start(initializer, initargs)
 
-        if initializer is not None:
-            initializer(*initargs)
+    def on_sigint(self, signum, frame):
+        self.shutdown()
+        sys.exit(0)
 
-        # create server
-        server = cls._Server({}, address, authkey, "pickle")
+    # @classmethod
+    # def _run_server(
+    #     cls,
+    #     address: tuple[str, int] | str | None,
+    #     authkey: bytes,
+    #     writer: connection.Connection,
+    #     initializer: Callable | None = None,
+    #     initargs: tuple = (),
+    # ) -> None:
+    #     """Create a server, report its address and run it"""
+    #     # bpo-36368: protect server process from KeyboardInterrupt signals
+    #     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        # inform parent process of the server's address
-        writer.send(server.address)
-        writer.close()
+    #     if initializer is not None:
+    #         initializer(*initargs)
 
-        # run the manager
-        util.info("manager serving at %r", server.address)
-        server.serve(forever=True)
+    #     # create server
+    #     server = cls._Server({}, address, authkey, "pickle")
 
-    def join(self, timeout: float | None = None) -> None:
-        """Join the manager process (if it has been spawned)"""
-        if self._process is not None:
-            self._process.join(timeout)
-            if not self._process.is_alive():
-                self._process = None
+    #     # inform parent process of the server's address
+    #     writer.send(server.address)
+    #     writer.close()
 
-    @staticmethod
-    def _finalize_manager(
-        process,
-        address,
-        authkey,
-        state,
-        _Client,
-        shutdown_timeout,
-    ):
-        """Shutdown the manager process; will be registered as a finalizer"""
-        if process.is_alive():
-            util.info("sending shutdown message to manager")
-            try:
-                conn = _Client(address, authkey=authkey)
-                try:
-                    dispatch(conn, None, "shutdown")
-                finally:
-                    conn.close()
-            except Exception:
-                pass
+    #     # run the manager
+    #     util.info("manager serving at %r", server.address)
+    #     server.serve(forever=True)
 
-            process.join(timeout=shutdown_timeout)
-            if process.is_alive():
-                util.info("manager still alive")
-                if hasattr(process, "terminate"):
-                    util.info("trying to `terminate()` manager process")
-                    process.terminate()
-                    process.join(timeout=shutdown_timeout)
-                    if process.is_alive():
-                        util.info("manager still alive after terminate")
-                        process.kill()
-                        process.join()
+    # def join(self, timeout: float | None = None) -> None:
+    #     """Join the manager process (if it has been spawned)"""
+    #     if self._process is not None:
+    #         self._process.join(timeout)
+    #         if not self._process.is_alive():
+    #             self._process = None
 
-        state.value = State.SHUTDOWN
+    # @staticmethod
+    # def _finalize_manager(
+    #     process,
+    #     address,
+    #     authkey,
+    #     state,
+    #     _Client,
+    #     shutdown_timeout,
+    # ):
+    #     """Shutdown the manager process; will be registered as a finalizer"""
+    #     if process.is_alive():
+    #         util.info("sending shutdown message to manager")
+    #         try:
+    #             conn = _Client(address, authkey=authkey)
+    #             try:
+    #                 dispatch(conn, None, "shutdown")
+    #             finally:
+    #                 conn.close()
+    #         except Exception:
+    #             pass
 
-    @property
-    def address(self):
-        return self._address
+    #         process.join(timeout=shutdown_timeout)
+    #         if process.is_alive():
+    #             util.info("manager still alive")
+    #             if hasattr(process, "terminate"):
+    #                 util.info("trying to `terminate()` manager process")
+    #                 process.terminate()
+    #                 process.join(timeout=shutdown_timeout)
+    #                 if process.is_alive():
+    #                     util.info("manager still alive after terminate")
+    #                     process.kill()
+    #                     process.join()
+
+    #     state.value = State.SHUTDOWN
+
+    # @property
+    # def address(self):
+    #     return self._address
 
     def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
@@ -361,61 +368,47 @@ class Manager(_Server):
         return self.registry[name](*args, **kwds)
 
 
-##=========================================================================================================
-##
-##  ##   ##   ####  ######  ####  ######  ####  ######  #####
-##  ###  ##  ##  ##   ##     ##   ##       ##   ##      ##  ##
-##  #### ##  ##  ##   ##     ##   #####    ##   #####   #####
-##  ## ####  ##  ##   ##     ##   ##       ##   ##      ##  ##
-##  ##  ###   ####    ##    ####  ##      ####  ######  ##   ##
-##
-##=========================================================================================================
+def _get_multiprocessing_pids() -> list[int]:
+    """If a process is killed, its children can be left orphaned. This kills all
+    python processes which have 'multiprocessing' in their command line args."""
+
+    pids: list[int] = []
+    try:
+        from psutil import process_iter
+    except ImportError:
+        return pids
+
+    for proc in process_iter():
+        try:
+            if "python" in proc.name().lower():
+                cmdline = " ".join(proc.cmdline())
+                if "multiprocessing" in cmdline:
+                    pids.append(proc.pid)
+        except Exception:  # noqa: PERF203
+            pass
+
+    return pids
 
 
-class Notifier:
-    """A class to send a notification about the completion of the setup."""
+def kill_multiprocessing_orphans(*args: Any, **kwargs: Any) -> list[int]:
+    """If a process is killed, its children can be left orphaned. This kills all
+    python processes which have 'multiprocessing' in their command line args."""
 
-    def __init__(self, file_path: str | Path | None = None, systemd: bool = False) -> None:
-        self.file_path: Path | None = None
-        if file_path is not None:
-            file_path = Path(file_path).resolve()
-            file_path.unlink(missing_ok=True)
-            self.file_path = file_path
+    try:
+        from psutil import Process
+    except ImportError:
+        return []
 
-        self._socket: socket.socket | None = None
-        if systemd:
-            try:
-                self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-                addr = os.getenv("NOTIFY_SOCKET")
-                # https://gist.github.com/grawity/6e5980981dccf66f554bbebb8cd169fc
-                # _"If the first path byte is @, this means an "abstract" socket,
-                # and you should change the 1st byte to 0x00 before using"_
-                addr = "\0" + addr[1:] if addr[0] == "@" else addr  # type: ignore
-                self._socket.connect(addr)  # type: ignore
-            except Exception:
-                self._socket = None
+    pids = _get_multiprocessing_pids()
 
-    def startup(self) -> None:
-        """Notify that the setup is complete."""
-        if self.file_path is not None:
-            self._touch(self.file_path)
+    for pid in pids:
+        try:
+            p = Process(pid)
+            p.kill()
+        except Exception:  # noqa: PERF203
+            pass
 
-        if self._socket:
-            self._socket.sendall(b"READY=1")
-
-    def shutdown(self) -> None:
-        if self.file_path is not None:
-            self._touch(self.file_path)
-
-        if self._socket:
-            self._socket.sendall(b"STOPPING=1")
-
-    @staticmethod
-    def _touch(file_path: str | Path) -> None:
-        file_path = Path(file_path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w") as f:
-            f.write("")
+    return pids
 
 
 __license__ = """

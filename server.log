@@ -1,0 +1,20 @@
+2024-08-30 18:25:01,550 [32mINFO[0m calling 'my_callback' with args: (1, 2, 3) and kwargs: {'hello': 'world'}[0m
+2024-08-30 18:25:01,551 [33mWARNING[0m callback not found[0m
+2024-08-30 18:25:01,756 [32mINFO[0m calling 'my_callback' with args: (1, 2, 3) and kwargs: {'hello': 'world'}[0m
+2024-08-30 18:25:01,757 [33mWARNING[0m callback not found[0m
+2024-08-30 18:25:01,961 [32mINFO[0m calling 'my_callback' with args: (1, 2, 3) and kwargs: {'hello': 'world'}[0m
+2024-08-30 18:25:01,964 [33mWARNING[0m callback not found[0m
+2024-08-30 18:25:02,167 [32mINFO[0m calling 'my_callback' with args: (1, 2, 3) and kwargs: {'hello': 'world'}[0m
+Traceback (most recent call last):
+  File "/Users/marcin/git/xpc/example/server.py", line 37, in <module>
+    value, found = manager.call(name, *args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/marcin/git/xpc/src/xpc/xpc.py", line 359, in call
+    conn = self._Client(self._address, authkey=self._authkey)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/marcin/.pyenv/versions/3.12.3/lib/python3.12/multiprocessing/connection.py", line 519, in Client
+    c = SocketClient(address)
+        ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/marcin/.pyenv/versions/3.12.3/lib/python3.12/multiprocessing/connection.py", line 647, in SocketClient
+    s.connect(address)
+ConnectionRefusedError: [Errno 61] Connection refused
