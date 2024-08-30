@@ -9,6 +9,9 @@ __project_root = Path(__file__).resolve().parents[1]
 sys.path.append(str(__project_root / "src"))
 
 
+from _server_fixture import *  # noqa: F401
+
+
 ##========================================================================================================
 ##
 ##   ####  ##   ##  #####  ######  ######   ####  ######  ####

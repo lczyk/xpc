@@ -21,7 +21,7 @@ if __name__ == "__main__":
         print("my_callh args:", args, "kwargs:", kwargs)
         time.sleep(1)
         # raise ValueError("This is a test error")
-        return 1016969
+        return 101
 
     manager.register("my_callback", my_callback)
 
