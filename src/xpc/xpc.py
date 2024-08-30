@@ -167,6 +167,8 @@ class Manager(ServerStuff):
     public = "call2"
 
     def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
+        if authkey is None:
+            authkey = process.current_process().authkey
         self._address = address  # XXX not final address if eg ('', 0)
         self._authkey = process.AuthenticationString(authkey)
         self._state = State()

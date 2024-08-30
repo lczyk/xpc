@@ -1,3 +1,37 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "xpc"
+authors = [{ name = "Marcin Konowalczyk", email = "marcin.konow@lczyk.xyz" }]
+dynamic = ["version", "description"]
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = []
+
+[project.urls]
+home = "https://github.com/marcinkonowalczyk/..."
+
+# coverage setup
+[tool.coverage.run]
+omit = ["tests/*", "**/__init__.py"]
+
+# coverage configuration
+[tool.coverage.report]
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+    "if TYPE_CHECKING:",
+    "except ImportError:",
+]
+
 [tool.mypy]
 ignore_missing_imports = true
 follow_imports = "normal"
@@ -19,9 +53,9 @@ local_partial_types = true
 
 
 files = [
-    "./**/*.py",
-    # "./tests/**/*.py",
-    # "./example/**/*.py",
+    "./src/**/*.py",
+    "./tests/**/*.py",
+    "./example/**/*.py",
     #
 ]
 

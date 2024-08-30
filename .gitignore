@@ -8,3 +8,6 @@ venv
 .venv
 .vscode
 .python-version
+*.lock
+dist
+.tox
