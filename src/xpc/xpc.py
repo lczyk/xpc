@@ -361,6 +361,63 @@ class Manager(_Server):
         return self.registry[name](*args, **kwds)
 
 
+##=========================================================================================================
+##
+##  ##   ##   ####  ######  ####  ######  ####  ######  #####
+##  ###  ##  ##  ##   ##     ##   ##       ##   ##      ##  ##
+##  #### ##  ##  ##   ##     ##   #####    ##   #####   #####
+##  ## ####  ##  ##   ##     ##   ##       ##   ##      ##  ##
+##  ##  ###   ####    ##    ####  ##      ####  ######  ##   ##
+##
+##=========================================================================================================
+
+
+class Notifier:
+    """A class to send a notification about the completion of the setup."""
+
+    def __init__(self, file_path: str | Path | None = None, systemd: bool = False) -> None:
+        self.file_path: Path | None = None
+        if file_path is not None:
+            file_path = Path(file_path).resolve()
+            file_path.unlink(missing_ok=True)
+            self.file_path = file_path
+
+        self._socket: socket.socket | None = None
+        if systemd:
+            try:
+                self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                addr = os.getenv("NOTIFY_SOCKET")
+                # https://gist.github.com/grawity/6e5980981dccf66f554bbebb8cd169fc
+                # _"If the first path byte is @, this means an "abstract" socket,
+                # and you should change the 1st byte to 0x00 before using"_
+                addr = "\0" + addr[1:] if addr[0] == "@" else addr  # type: ignore
+                self._socket.connect(addr)  # type: ignore
+            except Exception:
+                self._socket = None
+
+    def startup(self) -> None:
+        """Notify that the setup is complete."""
+        if self.file_path is not None:
+            self._touch(self.file_path)
+
+        if self._socket:
+            self._socket.sendall(b"READY=1")
+
+    def shutdown(self) -> None:
+        if self.file_path is not None:
+            self._touch(self.file_path)
+
+        if self._socket:
+            self._socket.sendall(b"STOPPING=1")
+
+    @staticmethod
+    def _touch(file_path: str | Path) -> None:
+        file_path = Path(file_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "w") as f:
+            f.write("")
+
+
 __license__ = """
 Copyright 2024 Marcin Konowalczyk
 
