@@ -22,26 +22,34 @@ def server() -> Iterator[subprocess.Popen]:
     args = [interpreter, str(__example_server__)]
 
     signal.signal(signal.SIGINT, kill_multiprocessing_orphans)
-    with (
-        open("server.log", "w+") as f,
-        subprocess.Popen(
-            args,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            bufsize=0,
-            start_new_session=True,
-        ) as p,
-    ):
-        time.sleep(1)
+    with subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as p:
+        time.sleep(0.1)
+        assert p.poll() is None
         yield p
+        if p.poll() is None:
+            p.send_signal(signal.SIGINT)
 
 
 def test_run_server(server: subprocess.Popen) -> None:
-    assert server.poll() is None
+    # Send a signal to the server to stop
     server.send_signal(signal.SIGINT)
     retcode = server.wait()
     assert retcode == 0
 
 
-# def test_run_server_again(server: subprocess.Popen) -> None:
-#     assert server.poll() is None
+def test_run_server_again(server: subprocess.Popen) -> None:
+    server.send_signal(signal.SIGINT)
+    retcode = server.wait()
+    assert retcode == 0
+
+
+def test_run_server_nostop(server: subprocess.Popen) -> None:
+    pass
+
+
+def test_run_server_nostop_again(server: subprocess.Popen) -> None:
+    pass
