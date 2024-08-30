@@ -9,22 +9,26 @@ import sys
 import threading
 import traceback
 from multiprocessing import connection, process, util
-from multiprocessing.context import ProcessError
-from multiprocessing.managers import (
+from multiprocessing.context import BaseContext, ProcessError
+from multiprocessing.managers import (  # type: ignore
     State,
     dispatch,
     get_context,
 )
-from multiprocessing.process import AuthenticationString
-from typing import Any, Callable
+from multiprocessing.managers import BaseManager
+
+from multiprocessing.process import AuthenticationString  # type: ignore
+from typing import Any, Callable, Union
 
 __version__ = "0.1.0"
 
 __all__ = ["Manager"]
 
 
-class ServerStuff:
+class _Server:
     _authkey: bytes
+    listener: connection.Listener
+    public: tuple[str, ...]
 
     def serve(self, forever: bool = True) -> None:
         """Run the server forever"""
@@ -93,13 +97,15 @@ class ServerStuff:
         try:
             self._handle_request(conn)
         except SystemExit:
-            # Server.serve_client() calls sys.exit(0) on EOF
             pass
         finally:
             conn.close()
 
+    def serve_forever(self) -> None:
+        self.serve(forever=True)
 
-class Server(ServerStuff):
+
+class Server(_Server):
     """
     Server class which runs in a process controlled by a manager object
     """
@@ -113,16 +119,25 @@ class Server(ServerStuff):
         "dummy",
     )
 
-    def __init__(self, address: tuple[str, int] | str | None = None, authkey: bytes | str = b""):
+    def __init__(
+        self,
+        _registry: dict[str, str] = {},  # XXX: unused
+        address: Union[tuple[str, int], str, None] = None,
+        authkey: Union[bytes, str] = b"",
+        _serializer: str = "pickle",  # XXX: unused
+    ):
         if not isinstance(authkey, bytes):
             raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
+        if len(_registry) != 0:
+            raise ValueError("Registry must be empty")
+        if _serializer != "pickle":
+            raise ValueError(f"Serializer {_serializer!r} not supported")
 
-        self.registry: dict[str, str] = {}
+        self.registry: dict[str, str] = _registry
         self._authkey = AuthenticationString(authkey)
-        Listener, _Client = connection.Listener, connection.Client
 
         # do authentication later
-        self.listener = Listener(address=address, backlog=128)
+        self.listener = connection.Listener(address=address, backlog=128)
         self.address = self.listener.address
 
     def dummy(self, c: connection.Connection) -> None:
@@ -144,7 +159,7 @@ class Server(ServerStuff):
             self.stop_event.set()
 
     def call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
-        # print("call", name, args, kwds, self.registry)
+        util.debug(f"Calling {name} with args {args} and kwargs {kwds}")
         if name not in self.registry:
             return None, False
         address = self.registry[name]
@@ -153,7 +168,7 @@ class Server(ServerStuff):
             conn = connection.Client(address, authkey=self._authkey)
             return dispatch(conn, None, "call2", (name, *args), kwds), True
         except Exception as e:
-            print(f"Error calling {name}: {e}")
+            util.info(f"Error calling {name}: {e}")
             # mpc is broken. Remove it.
             del self.registry[name]
             return None, False
@@ -162,41 +177,53 @@ class Server(ServerStuff):
                 conn.close()
 
 
-class Manager(ServerStuff):
+class Manager(_Server):
     _Server = Server
-    public = "call2"
+    public = ("call2",)
 
-    def __init__(self, address=None, authkey=None, ctx=None, *, shutdown_timeout=1.0):
+    def __init__(
+        self,
+        address: Union[tuple[str, int], str, None] = None,
+        authkey: Union[bytes, str, None] = None,
+        ctx: Union[BaseContext, None] = None,
+        *,
+        shutdown_timeout: float = 1.0,
+    ) -> None:
         if authkey is None:
             authkey = process.current_process().authkey
         self._address = address  # XXX not final address if eg ('', 0)
-        self._authkey = process.AuthenticationString(authkey)
+        self._authkey = AuthenticationString(authkey)
         self._state = State()
         self._state.value = State.INITIAL
         self._Listener, self._Client = connection.Listener, connection.Client
         self._ctx = ctx or get_context()
+        if not hasattr(self._ctx, "Process"):
+            raise ValueError("Context does not support Process objects")
         self._shutdown_timeout = shutdown_timeout
+        self._serializer = "pickle"
 
-        # do authentication later
+        # NOTE: do authentication later
         self.listener = self._Listener(address=None, backlog=128)
-        self._man_address = self.listener.address
-
-        self.registry = {}
+        self.registry: dict[str, Callable] = {}
 
     def connect(self) -> None:
-        """
-        Connect manager object to the server process
-        """
-        self.serve(forever=False)
+        """Connect manager object to the server process"""
+        self.serve(forever=False)  # Start own server
+        assert self._address is not None
+
+        # Do a dummy call to check if the server is alive
         conn = connection.Client(self._address, authkey=self._authkey)
         self._state.value = State.STARTED
-
         try:
             dispatch(conn, None, "dummy")
         finally:
             conn.close()
 
-    def start(self, initializer: Callable | None = None, initargs: tuple = ()) -> None:
+    def start(
+        self,
+        initializer: Callable | None = None,
+        initargs: tuple = (),
+    ) -> None:
         """Spawn a server process for this manager object"""
         if self._state.value != State.INITIAL:
             if self._state.value == State.STARTED:
@@ -213,7 +240,7 @@ class Manager(ServerStuff):
         reader, writer = connection.Pipe(duplex=False)
 
         # spawn process which runs a server
-        self._process = self._ctx.Process(
+        self._process = self._ctx.Process(  # type: ignore
             target=type(self)._run_server,
             args=(self.address, self._authkey, writer, initializer, initargs),
         )
@@ -243,7 +270,7 @@ class Manager(ServerStuff):
         writer: connection.Connection,
         initializer: Callable | None = None,
         initargs: tuple = (),
-    ):
+    ) -> None:
         """Create a server, report its address and run it"""
         # bpo-36368: protect server process from KeyboardInterrupt signals
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -252,7 +279,7 @@ class Manager(ServerStuff):
             initializer(*initargs)
 
         # create server
-        server = cls._Server(address, authkey)
+        server = cls._Server({}, address, authkey, "pickle")
 
         # inform parent process of the server's address
         writer.send(server.address)
@@ -262,7 +289,7 @@ class Manager(ServerStuff):
         util.info("manager serving at %r", server.address)
         server.serve(forever=True)
 
-    def join(self, timeout=None):
+    def join(self, timeout: float | None = None) -> None:
         """Join the manager process (if it has been spawned)"""
         if self._process is not None:
             self._process.join(timeout)
@@ -270,7 +297,14 @@ class Manager(ServerStuff):
                 self._process = None
 
     @staticmethod
-    def _finalize_manager(process, address, authkey, state, _Client, shutdown_timeout):
+    def _finalize_manager(
+        process,
+        address,
+        authkey,
+        state,
+        _Client,
+        shutdown_timeout,
+    ):
         """Shutdown the manager process; will be registered as a finalizer"""
         if process.is_alive():
             util.info("sending shutdown message to manager")
@@ -309,7 +343,7 @@ class Manager(ServerStuff):
         # Register on the remote
         conn = self._Client(self._address, authkey=self._authkey)
         try:
-            dispatch(conn, None, "register", (name, self._man_address))
+            dispatch(conn, None, "register", (name, self.listener.address))
         finally:
             conn.close()
 
