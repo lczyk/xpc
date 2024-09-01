@@ -9,7 +9,7 @@ __project_root = Path(__file__).resolve().parents[1]
 sys.path.append(str(__project_root / "src"))
 
 
-from _server_fixture import *  # noqa: F401
+from _server_fixture import *  # noqa: E402, F403
 
 
 # Register a custom pytest --kill-orphans command line option

@@ -1,9 +1,9 @@
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
-import sys
 
 import pytest
 
@@ -27,4 +27,9 @@ def server() -> Iterator[subprocess.Popen]:
         assert p.poll() is None
         yield p
         if p.poll() is None:
-            p.send_signal(signal.SIGINT)
+            if sys.platform == "win32":
+                p.send_signal(signal.SIGTERM)
+            else:
+                p.send_signal(signal.SIGINT)
+            p.wait()
+        assert p.poll() is not None

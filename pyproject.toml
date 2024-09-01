@@ -76,6 +76,7 @@ exclude = [
 line-length = 120
 lint.ignore = [
     "E731",
+    "F402",    # module level import not at top of file
     "SIM105",
     "PLR0911", # too many return statements
     "PLR0912", # too many branches
