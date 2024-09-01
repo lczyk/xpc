@@ -325,11 +325,7 @@ class Manager(_Server):
 
 
 class ManagerProxy:
-    def __init__(
-        self,
-        address: _Address,
-        authkey: bytes,
-    ) -> None:
+    def __init__(self, address: _Address, authkey: bytes) -> None:
         self._address = address
 
         self._authkey = bytes(authkey) if authkey is not None else None
