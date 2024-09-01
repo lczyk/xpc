@@ -135,6 +135,8 @@ class _Server:
     public: tuple[str, ...]
     address: Union[tuple[str, int], str]
 
+    raise_on_error: bool = False
+
     def serve(self, address: Union[tuple[str, int], str]) -> None:
         self.stop_event = threading.Event()
         process.current_process()._manager_server = self  # type: ignore
@@ -175,6 +177,8 @@ class _Server:
             try:
                 result = func(c, *args, **kwds)
             except Exception:
+                if self.raise_on_error:
+                    raise
                 msg = ("#TRACEBACK", traceback.format_exc())
             else:
                 msg = ("#RETURN", result)
@@ -254,7 +258,7 @@ class Server(_Server):
         except Exception as e:
             util.info(f"Error calling {name}: {e}")
             # mpc is broken. Remove it.
-            del self._registry[name]
+            self._registry.pop(name, None)
             return None, False
         finally:
             if conn:
@@ -269,8 +273,7 @@ class Manager(_Server):
     _address2: Union[tuple[str, int], str]
     _authkey: bytes
 
-    _address_to_local = {}
-    _mutex = util.ForkAwareThreadLock()
+    raise_on_error: bool = True
 
     def __init__(
         self,
@@ -284,14 +287,6 @@ class Manager(_Server):
         address = _resolve_address(address)[0] if address is None else address
         self._address = address
         self._address2 = _resolve_address()[0]  # Also create an address for the reverse connection
-
-        with Manager._mutex:
-            tls = Manager._address_to_local.get(address, None)
-            if tls is None:
-                tls = util.ForkAwareLocal()
-                Manager._address_to_local[address] = tls
-
-        self._tls = tls
 
         authkey = process.current_process().authkey if authkey is None else authkey
         authkey = bytes(authkey) if picklable else AuthenticationString(authkey)
@@ -392,7 +387,6 @@ class Manager(_Server):
             exitpriority=0,
         )
 
-    @override
     @classmethod
     def _run_server(
         cls,
@@ -463,13 +457,12 @@ class Manager(_Server):
                         process.join()
 
         state.value = State.SHUTDOWN
-        try:
-            del Manager._address_to_local[address]
-        except KeyError:
-            pass
+        # try:
+        #     del Manager._address_to_local[address]
+        # except KeyError:
+        #     pass
 
-    ##############################
-
+    @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
         return (
             ManagerProxy,
@@ -493,7 +486,11 @@ class ManagerProxy:
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
 
-        conn = self._Client(self._address, authkey=self._authkey)
+        try:
+            conn = self._Client(self._address, authkey=self._authkey)
+        except ConnectionRefusedError:
+            # The proxy cannot connect to the server
+            return None, False
 
         try:
             return dispatch(conn, None, "call", (name, *args), kwds)  # type: ignore

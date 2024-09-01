@@ -27,14 +27,17 @@ def setup_logging() -> None:
 
 def process_target(man: Manager) -> None:
     setup_logging()
-    while True:
-        # logging.info("calling 'my_callback' from another process")
-        value, found = man.call("my_callback")
-        if found:
-            logging.info(f"another callback returned: {value}")
-        else:
-            logging.warning("another callback not found")
-        time.sleep(0.2)
+    try:
+        while True:
+            # logging.info("calling 'my_callback' from another process")
+            value, found = man.call("my_callback")
+            if found:
+                logging.info(f"another callback returned: {value}")
+            else:
+                logging.warning("another callback not found")
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
