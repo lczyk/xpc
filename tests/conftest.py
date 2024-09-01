@@ -12,6 +12,30 @@ sys.path.append(str(__project_root / "src"))
 from _server_fixture import *  # noqa: F401
 
 
+# Register a custom pytest --kill-orphans command line option
+def pytest_addoption(parser: Any) -> None:
+    parser.addoption(
+        "--kill-orphans",
+        action="store_true",
+        default=False,
+        help="Kill any orphaned processes after the test run",
+    )
+
+
+# Register a custom code to run before all tests
+def pytest_sessionstart(session: Any) -> None:
+    if session.config.getoption("--kill-orphans"):
+        try:
+            from xpc import kill_multiprocessing_orphans
+
+            killed_pids = kill_multiprocessing_orphans()
+            if killed_pids:
+                print(f"Killed orphaned processes: {killed_pids}")
+        except Exception as e:
+            print(f"Error killing orphans: {e}")
+            pass
+
+
 ##========================================================================================================
 ##
 ##   ####  ##   ##  #####  ######  ######   ####  ######  ####
