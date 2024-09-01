@@ -58,7 +58,6 @@ TODO:
     the registry no matter what. Thats appropriate if someone registers a callback with wrong signature, but
     what if we want the callback to return an error? We should probably return (value, error, found) from the call.
 - [ ] Switch to our own multiprocessing-style logging
-- [ ] Do we still need the kill-orphans stuff??
 
 Written by Marcin Konowalczyk.
 """
@@ -82,9 +81,9 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
-__all__ = ["Manager", "kill_multiprocessing_orphans"]
+__all__ = ["Manager"]
 
 
 if os.environ.get("XPC_DEBUG", False):
@@ -352,49 +351,6 @@ class ManagerProxy:
         raise RuntimeError("Cannot connect a ManagerProxy. Connect the main Manager object instead.")
 
 
-def _get_multiprocessing_pids() -> list[int]:
-    pids: list[int] = []
-    try:
-        from psutil import process_iter
-    except ImportError:
-        return pids
-
-    for proc in process_iter():
-        try:
-            if "python" in proc.name().lower():
-                cmdline = " ".join(proc.cmdline())
-                if "multiprocessing" in cmdline:
-                    pids.append(proc.pid)
-        except Exception:  # noqa: PERF203
-            pass
-
-    return pids
-
-
-def kill_multiprocessing_orphans(*args: Any, **kwargs: Any) -> list[int]:
-    """If a process is killed, its children can be left orphaned. This kills all
-    python processes which have 'multiprocessing' in their command line args.
-
-    Example usage:
-    >>> import signal
-    >>> signal.signal(signal.SIGINT, kill_multiprocessing_orphans)
-    """
-
-    try:
-        from psutil import Process
-    except ImportError:
-        return []
-
-    pids = _get_multiprocessing_pids()
-    for pid in pids:
-        try:
-            Process(pid).kill()
-        except Exception:  # noqa: PERF203
-            pass
-
-    return pids
-
-
 __license__ = """
 Copyright 2024 Marcin Konowalczyk
 
@@ -425,17 +381,3 @@ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--kill-orphans", action="store_true")
-    args = parser.parse_args()
-
-    if args.kill_orphans:
-        pids = kill_multiprocessing_orphans()
-        print(f"Killed {len(pids)} orphaned processes")
-    else:
-        parser.print_help()
