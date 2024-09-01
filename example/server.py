@@ -10,17 +10,17 @@ from xpc import Manager
 if __name__ == "__main__":
     import logging
 
+    logger = logging.getLogger("server")
+    handler = logging.StreamHandler()
+    format = "%(asctime)s %(levelname)s %(message)s"
     try:
         import colorlog
 
-        handler = colorlog.StreamHandler()
-        # Add date to the log format
         handler.setFormatter(colorlog.ColoredFormatter("%(asctime)s %(log_color)s%(levelname)s%(reset)s %(message)s"))
     except ImportError:
-        handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-
-    logging.basicConfig(level=logging.INFO, handlers=[handler])
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
 
     import argparse
 
@@ -46,12 +46,12 @@ if __name__ == "__main__":
             _name = "my_callback"
             _args = (1, 2, 3)
             _kwargs = {"hello": "world"}
-            # logging.info(f"calling '{_name}' with args: {_args} and kwargs: {_kwargs}")
+            # logger.info(f"calling '{_name}' with args: {_args} and kwargs: {_kwargs}")
             value, found = manager.call(_name, *_args, **_kwargs)
             if found:
-                logging.info(f"callback returned: {value}")
-            # else:
-            #     logging.warning("callback not found")
+                logger.info(f"callback returned: {value}")
+            else:
+                logger.warning("callback not found")
             time.sleep(1 / args.frequency)
     except KeyboardInterrupt:
         pass

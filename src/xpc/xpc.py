@@ -67,7 +67,7 @@ import os
 import threading
 import traceback
 from functools import wraps
-from multiprocessing import connection, process, util
+from multiprocessing import connection, process
 from multiprocessing.managers import dispatch  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
@@ -86,17 +86,37 @@ __version__ = "0.5.0"
 __all__ = ["Manager"]
 
 
-if os.environ.get("XPC_DEBUG", False):
-    util.log_to_stderr(10)
-    util.info("xpc module loaded")
+_logger: "logging.Logger | None" = None
 
+
+def _debug(msg: str, *args: Any) -> None:
+    if _logger:
+        _logger.log(20, msg, *args, stacklevel=2)
+
+
+def _info(msg: str, *args: Any) -> None:
+    if _logger:
+        _logger.log(10, msg, *args, stacklevel=2)
+
+
+if os.environ.get("XPC_DEBUG", False):
+    import logging
+
+    _logger = logging.getLogger("xpc")
+    handler = logging.StreamHandler()
+    format = "[%(levelname)s/%(processName)s] %(message)s"
     try:
         import colorlog
 
-        logger = util.get_logger()
-        logger.handlers[0].setFormatter(colorlog.ColoredFormatter())
+        handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s" + format))
     except ImportError:
-        pass
+        formatter = logging.Formatter(format)
+        handler.setFormatter(formatter)
+    _logger.addHandler(handler)
+
+    _logger.setLevel(logging.DEBUG)
+
+    _info("xpc module loaded")
 
 
 def _resolve_address(
@@ -174,16 +194,16 @@ class _Server:
                 c.send(("#TRACEBACK", traceback.format_exc()))
             except Exception:
                 pass
-            util.info("Failure to send message: %r", msg)
-            util.info(" ... request was %r", request)
-            util.info(" ... exception was %r", e)
+            _info("Failure to send message: %r", msg)
+            _info(" ... request was %r", request)
+            _info(" ... exception was %r", e)
 
     def handle_request(self, conn: connection.Connection) -> None:
         """Handle a new connection"""
         try:
             self._handle_request(conn)
         except SystemExit:
-            util.info("SystemExit in server")
+            _info("SystemExit in server")
             pass
         finally:
             conn.close()
@@ -249,7 +269,7 @@ class Manager(_Server):
     @_check_state(State.CLIENT_STARTED)
     def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
-        util.debug(f"Registering '{name}'")
+        _debug(f"Registering '{name}'")
 
         # Register on the local
         self._registry_callback[name] = callable
@@ -266,17 +286,17 @@ class Manager(_Server):
         """Attempt to call a callback on the server"""
         address = self._registry_address.get(name)
         if address is None:
-            util.debug(f"Server does not know about '{name}'")
+            _debug(f"Server does not know about '{name}'")
             return None, False
         else:
-            util.debug(f"Server calling '{name}' at {address}")
+            _debug(f"Server calling '{name}' at {address}")
 
         conn = None
         try:
             conn = connection.Client(address, authkey=self._authkey)
             return dispatch(conn, None, "_call", (name, *args), kwds), True
         except Exception as e:
-            util.info(f"Error calling '{name}': {e}")
+            _info(f"Error calling '{name}': {e}")
             # call is broken. remove it.
             self._registry_address.pop(name, None)
             return None, False
@@ -300,7 +320,7 @@ class Manager(_Server):
 
     def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by the server to call a callback"""
-        util.debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
+        _debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
         if name not in self._registry_callback:
             raise ValueError(f"Callback {name!r} not found")
         return self._registry_callback[name](*args, **kwds)  # type: ignore
@@ -312,7 +332,7 @@ class Manager(_Server):
     def _register(self, c: connection.Connection, name: str, address: _Address) -> None:
         """Called by the client to register a callback. Proxy needs another lever of indirection because
         it does not hold the registry of callbacks."""
-        util.debug(f"Server registering '{name}' at {address}")
+        _debug(f"Server registering '{name}' at {address}")
         self._registry_address[name] = address
 
     @override
