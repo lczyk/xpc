@@ -18,7 +18,7 @@ if __name__ == "__main__":
 
     def my_callback(*args: Any, **kwargs: Any) -> int:
         # def my_callback() -> int:
-        print("my_callh args:", args, "kwargs:", kwargs)
+        print("my_call args:", args, "kwargs:", kwargs)
         time.sleep(1)
         # raise ValueError("This is a test error")
         return 101
