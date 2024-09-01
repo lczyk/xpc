@@ -3,7 +3,69 @@ Single-file module for cross-process callbacks.
 
 Hosted at https://github.com/MarcinKonowalczyk/xpc
 
+This module provides a simple way to register callbacks in one process and call them in another. Teh motivating
+use-case is to allow registering custom callbacks in an application during testing, or for dynamic instrumentation
+(although the performance hit might be significant).
+
+In a main application we want to create a Manager object and start it:
+
+    ```python
+    from xpc import Manager
+    man = Manager(
+        address=("localhost", 50000),
+        authkey="password",
+    )
+    man.start()
+    ```
+
+We can then attempt callbacks from it:
+
+    ```python
+    result, found = manager.call("my_callback", 1, 2, 3, a=4, b=5)
+    if found:
+        print(f"Result: {result}")
+    else:
+        print("Callback not found")
+    ```
+
+In a separate process, we can register callbacks by creating a Manager object and connecting to the server:
+
+    ```python
+    from xpc import Manager
+
+    manager = Manager(
+        address=("localhost", 50000),
+        authkey="password",
+    )
+    manager.connect()
+
+    def my_callback(*args, **kwargs):
+        print("my_callback args:", args, "kwargs:", kwargs)
+        return 99
+
+    manager.register("my_callback", my_callback)
+    ```
+
+The main app will then succeed in calling the callback. All the args and kwargs are pickled and sent over to the
+process which registered the callback, and the return values are sent back. **The callback executes in the process
+which registered it.**
+
+NOTE:
 We piggyback a bit on the BaseManager from the multiprocessing module, but we roll our own server class.
+
+TODO:
+- [ ] The communication between manager and server can probably be done much neater -- this could all take place
+    over a single connection between the server and the manager.
+- [ ] `unregister` method for the manager and nicer handling of multiple `register` calls.
+- [ ] Better error handling for errors in the callbacks. Currently, the server will just remove the callback from
+    the registry no matter what. Thats appropriate if someone registers a callback with wrong signature, but
+    what if we want the callback to return an error? We should probably return (value, error, found) from the call.
+- [ ] Do we even need the server to run in a separate process? mutliprocessing.Manager does this, but we could
+    probably just run the server in a separate thread and then we would not need to worry about the server process
+    getting orphaned(?) This might also improve the performance of `call` from the main manager, since we would
+    not need to call to a separate process???
+- [ ] Switch to our own multiprocessing-style logging
+
 Written by Marcin Konowalczyk.
 """
 
@@ -110,7 +172,7 @@ class _Server:
 
 
 class Server(_Server):
-    public = ("shutdown", "create", "has_callback", "register", "call", "dummy")
+    public = ("shutdown", "register", "call", "dummy")
 
     def __init__(
         self,
