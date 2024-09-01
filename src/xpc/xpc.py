@@ -51,13 +51,10 @@ process which registered the callback, and the return values are sent back. **Th
 which registered it.**
 
 TODO:
-- [ ] The communication between manager and server can probably be done much neater -- this could all take place
-    over a single connection between the server and the manager.
 - [ ] `unregister` method for the manager and nicer handling of multiple `register` calls.
 - [ ] Better error handling for errors in the callbacks. Currently, the server will just remove the callback from
     the registry no matter what. Thats appropriate if someone registers a callback with wrong signature, but
     what if we want the callback to return an error? We should probably return (value, error, found) from the call.
-- [ ] Switch to our own multiprocessing-style logging
 
 Written by Marcin Konowalczyk.
 """
@@ -85,19 +82,10 @@ __version__ = "0.5.0"
 
 __all__ = ["Manager"]
 
-
 _logger: "logging.Logger | None" = None
 
-
-def _debug(msg: str, *args: Any) -> None:
-    if _logger:
-        _logger.log(20, msg, *args, stacklevel=2)
-
-
-def _info(msg: str, *args: Any) -> None:
-    if _logger:
-        _logger.log(10, msg, *args, stacklevel=2)
-
+_debug = lambda msg, *args: _logger.log(20, msg, *args, stacklevel=2) if _logger else None
+_info = lambda msg, *args: _logger.log(10, msg, *args, stacklevel=2) if _logger else None
 
 if os.environ.get("XPC_DEBUG", False):
     import logging
@@ -113,9 +101,7 @@ if os.environ.get("XPC_DEBUG", False):
         formatter = logging.Formatter(format)
         handler.setFormatter(formatter)
     _logger.addHandler(handler)
-
     _logger.setLevel(logging.DEBUG)
-
     _info("xpc module loaded")
 
 
@@ -212,9 +198,7 @@ class _Server:
 class State(enum.Enum):
     INITIAL = 0
     SERVER_STARTED = 1
-    # SERVER_SHUTDOWN = 2
     CLIENT_STARTED = 3
-    # CLIENT_SHUTDOWN = 4
 
 
 def _check_state(state: State) -> Callable[[_T], _T]:
