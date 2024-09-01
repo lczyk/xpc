@@ -74,7 +74,7 @@ import sys
 import threading
 import traceback
 from multiprocessing import connection, process, util
-from multiprocessing.context import BaseContext
+from multiprocessing.context import BaseContext, ProcessError
 from multiprocessing.managers import (  # type: ignore
     State,
     dispatch,
@@ -142,8 +142,15 @@ class _Server:
         accepter.daemon = True
         accepter.start()
 
-    def accepter(self, address: Union[tuple[str, int], str]) -> None:
+    def accepter(
+        self,
+        address: Union[tuple[str, int], str],
+        on_start: Union[threading.Event, None] = None,
+    ) -> None:
         listener = connection.Listener(address=address, backlog=128)
+        if on_start:
+            print("Setting on_start")
+            on_start.set()
         while True:
             try:
                 c = listener.accept()
@@ -195,7 +202,7 @@ class _Server:
 
 
 class Server(_Server):
-    public = ("shutdown", "register", "call", "dummy")
+    public = ("shutdown", "register", "call", "dummy", "accept_connection")
 
     def __init__(
         self,
@@ -214,7 +221,7 @@ class Server(_Server):
         authkey = bytes(authkey) if picklable else AuthenticationString(authkey)
         self._authkey = authkey
 
-        self.address = address
+        self._address = address
 
     def dummy(self, c: connection.Connection) -> None:
         pass
@@ -258,6 +265,10 @@ class Manager(_Server):
     _Server = Server
     public = ("_call",)
 
+    _address: Union[tuple[str, int], str]
+    _address2: Union[tuple[str, int], str]
+    _authkey: bytes
+
     _address_to_local = {}
     _mutex = util.ForkAwareThreadLock()
 
@@ -274,8 +285,6 @@ class Manager(_Server):
         self._address = address
         self._address2 = _resolve_address()[0]  # Also create an address for the reverse connection
 
-        # Init the thread-local storage
-        # XXX: What about when we don't have the address yet?
         with Manager._mutex:
             tls = Manager._address_to_local.get(address, None)
             if tls is None:
@@ -301,15 +310,9 @@ class Manager(_Server):
         # NOTE: do authentication later
         self._registry: dict[str, Callable] = {}
 
-    @property
-    def address(self):
-        return self._address
-
-    @override
     def connect(self) -> None:
         """Connect manager object to the server process"""
-        self.serve(address=self._address2)
-        assert self._address is not None
+        self.serve(address=self._address2)  # Start the callback server
         conn = connection.Client(self._address, authkey=self._authkey)
         dispatch(conn, None, "dummy")
         self._state.value = State.STARTED
@@ -347,7 +350,7 @@ class Manager(_Server):
 
     ##############################
 
-    def start(self):
+    def start(self) -> None:
         """Spawn a server process for this manager object"""
         if self._state.value != State.INITIAL:
             if self._state.value == State.STARTED:
@@ -361,6 +364,7 @@ class Manager(_Server):
         reader, writer = connection.Pipe(duplex=False)
 
         # spawn process which runs a server
+        assert hasattr(self._ctx, "Process")
         self._process = self._ctx.Process(
             target=type(self)._run_server,
             args=(
@@ -392,11 +396,11 @@ class Manager(_Server):
     @classmethod
     def _run_server(
         cls,
-        address,
-        authkey,
-        writer,
-        picklable=False,
-    ):
+        address: Union[tuple[str, int], str],
+        authkey: Union[bytes, str],
+        writer: object,
+        picklable: bool = False,
+    ) -> None:
         """Create a server, report its address and run it"""
         # bpo-36368: protect server process from KeyboardInterrupt signals
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -405,14 +409,14 @@ class Manager(_Server):
         server = cls._Server(address, authkey, picklable=picklable)
 
         # inform parent process of the server's address
-        writer.send(server.address)
+        writer.send(server._address)
         writer.close()
 
         # run the manager
-        util.info("manager serving at %r", server.address)
+        util.info("manager serving at %r", server._address)
 
         try:
-            server.serve(address=server.address)
+            server.serve(address=server._address)
             try:
                 while not server.stop_event.is_set():
                     server.stop_event.wait(1)
@@ -426,7 +430,14 @@ class Manager(_Server):
             sys.exit(0)
 
     @staticmethod
-    def _finalize_manager(process, address, authkey, state, _Client, shutdown_timeout):
+    def _finalize_manager(
+        process: process.BaseProcess,
+        address: Union[tuple[str, int], str],
+        authkey: Union[bytes, str],
+        state: State,
+        _Client: connection.Client,
+        shutdown_timeout: float,
+    ) -> None:
         """Shutdown the manager process; will be registered as a finalizer"""
         if process.is_alive():
             util.info("sending shutdown message to manager")
@@ -456,6 +467,59 @@ class Manager(_Server):
             del Manager._address_to_local[address]
         except KeyError:
             pass
+
+    ##############################
+
+    def __reduce__(self) -> tuple[type, tuple, dict]:
+        return (
+            ManagerProxy,
+            (self._address, self._authkey),
+            {},
+        )
+
+
+class ManagerProxy:
+    def __init__(
+        self,
+        address: Union[tuple[str, int], str],
+        authkey: bytes,
+    ) -> None:
+        address = _resolve_address(address)[0] if address is None else address
+        self._address = address
+
+        self._authkey = bytes(authkey) if authkey is not None else None
+        self._Client = connection.Client
+
+    def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+        """Attempt to call a callback on the server"""
+
+        conn = self._Client(self._address, authkey=self._authkey)
+
+        try:
+            return dispatch(conn, None, "call", (name, *args), kwds)  # type: ignore
+        finally:
+            conn.close()
+
+    # def register(self, name: str, callable: Callable) -> None:  # type: ignore
+    #     """Register a new callback on the server. Return the token."""
+    #     # Register on the local
+    #     self._registry[name] = callable
+    #     # Register on the remote
+    #     assert self._address is not None
+    #     conn = self._Client(self._address, authkey=self._authkey)
+    #     try:
+    #         dispatch(conn, None, "register", (name, self._address2))
+    #     finally:
+    #         conn.close()
+
+    def register(self, name: str, callable: Callable) -> None:  # type: ignore
+        raise RuntimeError("Cannot register a callback on a ManagerProxy")
+
+    def start(self) -> None:
+        raise RuntimeError("Cannot start a ManagerProxy. Start the main Manager object instead.")
+
+    def connect(self) -> None:
+        raise RuntimeError("Cannot connect a ManagerProxy. Connect the main Manager object instead.")
 
 
 def _get_multiprocessing_pids() -> list[int]:
