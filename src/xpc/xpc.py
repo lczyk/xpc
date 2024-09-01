@@ -198,7 +198,7 @@ class State(enum.Enum):
     # CLIENT_SHUTDOWN = 4
 
 
-def check_state(state: State) -> Callable[[_T], _T]:
+def _check_state(state: State) -> Callable[[_T], _T]:
     def decorator(func: _T) -> _T:
         @wraps(func)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -214,8 +214,6 @@ def check_state(state: State) -> Callable[[_T], _T]:
 
 
 class Manager(_Server):
-    public = ("_dummy", "_call", "_register", "_call2")
-
     _address: _Address
     _address2: _Address
     _authkey: AuthenticationString
@@ -239,7 +237,7 @@ class Manager(_Server):
         self._registry_callback: dict[str, Callable] = {}
         self._registry_address: dict[str, _Address] = {}
 
-    @check_state(State.INITIAL)
+    @_check_state(State.INITIAL)
     def connect(self) -> None:
         """Connect manager object to the server process"""
         self.serve(address=self._address2)  # Start the callback server
@@ -249,7 +247,7 @@ class Manager(_Server):
         dispatch(conn, None, "_dummy")
         self._state = State.CLIENT_STARTED
 
-    @check_state(State.CLIENT_STARTED)
+    @_check_state(State.CLIENT_STARTED)
     def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
         util.debug(f"Registering '{name}'")
@@ -264,7 +262,7 @@ class Manager(_Server):
         finally:
             conn.close()
 
-    @check_state(State.SERVER_STARTED)
+    @_check_state(State.SERVER_STARTED)
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
         address = self._registry_address.get(name)
@@ -287,7 +285,7 @@ class Manager(_Server):
             if conn:
                 conn.close()
 
-    @check_state(State.INITIAL)
+    @_check_state(State.INITIAL)
     def start(self) -> None:
         """Spawn a server process for this manager object"""
         self.serve(address=self._address)  # Start the main server
@@ -295,6 +293,8 @@ class Manager(_Server):
         conn = connection.Client(self._address, authkey=self._authkey)
         dispatch(conn, None, "_dummy")
         self._state = State.SERVER_STARTED
+
+    public = ("_dummy", "_call", "_register", "_call2")
 
     def _dummy(self, c: connection.Connection) -> None:
         pass
