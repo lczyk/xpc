@@ -12,7 +12,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.urls]
-home = "https://github.com/marcinkonowalczyk/..."
+home = "https://github.com/marcinkonowalczyk/xpc"
 
 # coverage setup
 [tool.coverage.run]
