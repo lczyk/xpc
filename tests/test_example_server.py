@@ -1,8 +1,11 @@
 import signal
 import subprocess
 import sys
+import time
 
 import pytest
+
+from xpc import Manager
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Test only for Windows")
@@ -43,3 +46,25 @@ def test_run_server_nostop(server: subprocess.Popen) -> None:
 
 def test_run_server_nostop_again(server: subprocess.Popen) -> None:
     pass
+
+
+def test_register_callback(server: subprocess.Popen) -> None:
+    man = Manager(
+        address=("localhost", 19191),
+        authkey="password",
+    )
+    man.connect()
+
+    i = 0
+
+    def my_callback(*args: object, **kwargs: object) -> None:
+        nonlocal i
+        i += 1
+
+    assert i == 0
+
+    man.register("my_callback", my_callback)
+
+    time.sleep(0.1)  # Should be enough time for the server to call us
+
+    assert i > 0

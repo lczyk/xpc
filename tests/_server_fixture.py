@@ -16,7 +16,16 @@ def server() -> Iterator[subprocess.Popen]:
     assert __example_server__.exists()
 
     interpreter = sys.executable
-    args = [interpreter, str(__example_server__)]
+    args = [
+        interpreter,
+        str(__example_server__),
+        "--port",
+        "19191",
+        "--authkey",
+        "password",
+        "--frequency",
+        "20",
+    ]
 
     with subprocess.Popen(
         args,

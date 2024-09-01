@@ -165,7 +165,7 @@ class _Server:
             connection.deliver_challenge(c, self._authkey)
             connection.answer_challenge(c, self._authkey)
             request = c.recv()
-            ignore, funcname, args, kwds = request
+            _ignore, funcname, args, kwds = request
             assert funcname in self.public, f"{funcname!r} unrecognized"
             func = getattr(self, funcname)
         except Exception:
@@ -275,7 +275,7 @@ class Manager(_Server):
     def __init__(
         self,
         address: Union[tuple[str, int], str, None] = None,
-        authkey: Union[bytes, None] = None,
+        authkey: Union[bytes, str, None] = None,
         ctx: Union[BaseContext, None] = None,
         *,
         shutdown_timeout: float = 1.0,
@@ -285,6 +285,7 @@ class Manager(_Server):
         self._address = address
         self._address2 = _resolve_address()[0]  # Also create an address for the reverse connection
 
+        authkey = authkey.encode() if isinstance(authkey, str) else authkey
         authkey = process.current_process().authkey if authkey is None else authkey
         authkey = bytes(authkey) if picklable else AuthenticationString(authkey)
         self._picklable = picklable
