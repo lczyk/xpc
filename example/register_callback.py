@@ -15,10 +15,11 @@ if __name__ == "__main__":
         authkey=b"password",
     )
     manager.connect()
+    print("Connected to server")
 
     def my_callback(*args: Any, **kwargs: Any) -> int:
         # def my_callback() -> int:
-        print("my_call args:", args, "kwargs:", kwargs)
+        # print("my_call args:", args, "kwargs:", kwargs)
         time.sleep(1)
         # raise ValueError("This is a test error")
         return 101

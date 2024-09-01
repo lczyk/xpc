@@ -67,27 +67,22 @@ TODO:
 Written by Marcin Konowalczyk.
 """
 
+import enum
 import os
-import signal
-import sys
 import threading
 import traceback
+from functools import wraps
 from multiprocessing import connection, process, util
-from multiprocessing.context import BaseContext, ProcessError
-from multiprocessing.managers import (  # type: ignore
-    State,
-    dispatch,
-    get_context,
-)
+from multiprocessing.managers import dispatch  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
 
 if TYPE_CHECKING:
     from typing_extensions import Literal, override
 else:
     override = lambda x: x
     Literal = Union
-
+_T = TypeVar("_T", bound=Callable)
 
 __version__ = "0.3.0"
 
@@ -102,9 +97,7 @@ if os.environ.get("XPC_DEBUG", False):
         import colorlog
 
         logger = util.get_logger()
-        handler = colorlog.StreamHandler()
-        handler.setFormatter(colorlog.ColoredFormatter())
-        logger.addHandler(handler)
+        logger.handlers[0].setFormatter(colorlog.ColoredFormatter())
     except ImportError:
         pass
 
@@ -132,14 +125,14 @@ class _Server:
     public: tuple[str, ...]
     address: Union[tuple[str, int], str]
 
-    raise_on_error: bool = False
-
-    def serve(self, address: Union[tuple[str, int], str]) -> None:
+    def serve(self, address: Union[tuple[str, int], str], timeout: Union[float, None] = None) -> None:
         self.stop_event = threading.Event()
         process.current_process()._manager_server = self  # type: ignore
-        accepter = threading.Thread(target=self.accepter, args=(address,))
+        on_start = threading.Event()
+        accepter = threading.Thread(target=self.accepter, args=(address, on_start))
         accepter.daemon = True
         accepter.start()
+        on_start.wait(timeout=timeout)
 
     def accepter(
         self,
@@ -148,7 +141,6 @@ class _Server:
     ) -> None:
         listener = connection.Listener(address=address, backlog=128)
         if on_start:
-            print("Setting on_start")
             on_start.set()
         while True:
             try:
@@ -174,8 +166,6 @@ class _Server:
             try:
                 result = func(c, *args, **kwds)
             except Exception:
-                if self.raise_on_error:
-                    raise
                 msg = ("#TRACEBACK", traceback.format_exc())
             else:
                 msg = ("#RETURN", result)
@@ -196,89 +186,47 @@ class _Server:
         try:
             self._handle_request(conn)
         except SystemExit:
-            util.info("SystemExit in manager process")
+            util.info("SystemExit in server")
             pass
         finally:
             conn.close()
 
 
-class Server(_Server):
-    public = ("shutdown", "register", "call", "dummy", "accept_connection")
+class State(enum.Enum):
+    INITIAL = 0
+    SERVER_STARTED = 1
+    # SERVER_SHUTDOWN = 2
+    CLIENT_STARTED = 3
+    # CLIENT_SHUTDOWN = 4
 
-    def __init__(
-        self,
-        address: Union[tuple[str, int], str, None] = None,
-        authkey: Union[bytes, str] = b"",
-        *,
-        picklable: bool = False,
-    ):
-        if not isinstance(authkey, bytes):
-            raise TypeError(f"Authkey {authkey!r} is type {type(authkey)!s}, not bytes")
 
-        if address is None:
-            raise ValueError("Address must be provided")
+def check_state(state: State) -> Callable[[_T], _T]:
+    def decorator(func: _T) -> _T:
+        @wraps(func)
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            __tracebackhide__ = True
+            assert (
+                self._state == state
+            ), f"Must be in state {state} to call {func.__name__}. Current state: {self._state}"
+            return func(self, *args, **kwargs)
 
-        self._registry: dict[str, str] = {}
-        authkey = bytes(authkey) if picklable else AuthenticationString(authkey)
-        self._authkey = authkey
+        return wrapper  # type: ignore
 
-        self._address = address
-
-    def dummy(self, c: connection.Connection) -> None:
-        pass
-
-    def register(self, c: connection.Connection, name: str, address: str) -> None:
-        """Called by the client to register a callback"""
-        self._registry[name] = address
-
-    def shutdown(self, c: connection.Connection) -> None:
-        """Called by the client to shut down the server"""
-        try:
-            util.debug("manager received shutdown message")
-            c.send(("#RETURN", None))
-        except BaseException:
-            import traceback
-
-            traceback.print_exc()
-        finally:
-            self.stop_event.set()
-
-    def call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
-        util.debug(f"Calling {name} with args {args} and kwargs {kwds}")
-        if name not in self._registry:
-            return None, False
-        address = self._registry[name]
-        conn = None
-        try:
-            conn = connection.Client(address, authkey=self._authkey)
-            return dispatch(conn, None, "_call", (name, *args), kwds), True
-        except Exception as e:
-            util.info(f"Error calling {name}: {e}")
-            # mpc is broken. Remove it.
-            self._registry.pop(name, None)
-            return None, False
-        finally:
-            if conn:
-                conn.close()
+    return decorator
 
 
 class Manager(_Server):
-    _Server = Server
-    public = ("_call",)
+    public = ("_dummy", "_call", "_register")
 
     _address: Union[tuple[str, int], str]
     _address2: Union[tuple[str, int], str]
     _authkey: bytes
 
-    raise_on_error: bool = True
-
     def __init__(
         self,
         address: Union[tuple[str, int], str, None] = None,
         authkey: Union[bytes, str, None] = None,
-        ctx: Union[BaseContext, None] = None,
         *,
-        shutdown_timeout: float = 1.0,
         picklable: bool = False,
     ) -> None:
         address = _resolve_address(address)[0] if address is None else address
@@ -291,166 +239,87 @@ class Manager(_Server):
         self._picklable = picklable
         self._authkey = authkey
 
-        self._state = State()
-        self._state.value = State.INITIAL
+        self._state = State.INITIAL
         self._Listener, self._Client = connection.Listener, connection.Client
-        self._ctx = ctx or get_context()
-        if not hasattr(self._ctx, "Process"):
-            raise ValueError("Context does not support Process objects")
 
-        self._shutdown_timeout = shutdown_timeout
+        self._registry_callback: dict[str, Callable] = {}
+        self._registry_address: dict[str, Union[tuple[str, int], str]] = {}
 
-        # NOTE: do authentication later
-        self._registry: dict[str, Callable] = {}
-
+    @check_state(State.INITIAL)
     def connect(self) -> None:
         """Connect manager object to the server process"""
         self.serve(address=self._address2)  # Start the callback server
-        conn = connection.Client(self._address, authkey=self._authkey)
-        dispatch(conn, None, "dummy")
-        self._state.value = State.STARTED
 
-    @override
-    def register(self, name: str, callable: Callable) -> None:  # type: ignore
+        # Make a dummy call to the main server to make sure it is running
+        conn = connection.Client(self._address, authkey=self._authkey)
+        dispatch(conn, None, "_dummy")
+        self._state = State.CLIENT_STARTED
+
+    @check_state(State.CLIENT_STARTED)
+    def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
-        assert self._state.value == State.STARTED, "server not yet started"
+        util.debug(f"Registering '{name}'")
+
         # Register on the local
-        self._registry[name] = callable
-        # Register on the remote
-        assert self._address is not None
+        self._registry_callback[name] = callable
+
+        # Register on the server
         conn = self._Client(self._address, authkey=self._authkey)
         try:
-            dispatch(conn, None, "register", (name, self._address2))
+            dispatch(conn, None, "_register", (name, self._address2))
         finally:
             conn.close()
 
+    @check_state(State.SERVER_STARTED)
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
-        assert self._state.value == State.STARTED, "server not yet started"
-        assert self._address is not None
-        # TODO: hold conn in tls
-        conn = self._Client(self._address, authkey=self._authkey)
+        address = self._registry_address.get(name)
+        if address is None:
+            util.debug(f"Server does not know about '{name}'")
+            return None, False
+        else:
+            util.debug(f"Server calling '{name}' at {address}")
+
+        conn = None
         try:
-            return dispatch(conn, None, "call", (name, *args), kwds)  # type: ignore
+            conn = connection.Client(address, authkey=self._authkey)
+            return dispatch(conn, None, "_call", (name, *args), kwds), True
+        except Exception as e:
+            util.info(f"Error calling '{name}': {e}")
+            # call is broken. remove it.
+            self._registry_address.pop(name, None)
+            return None, False
         finally:
-            conn.close()
+            if conn:
+                conn.close()
+
+    @check_state(State.INITIAL)
+    def start(self) -> None:
+        """Spawn a server process for this manager object"""
+        self.serve(address=self._address)  # Start the main server
+        # Make a dummy call to the main server
+        conn = connection.Client(self._address, authkey=self._authkey)
+        dispatch(conn, None, "_dummy")
+        self._state = State.SERVER_STARTED
+
+    def _dummy(self, c: connection.Connection) -> None:
+        pass
 
     def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """This is the method that is called by the server to call a callback"""
-        if name not in self._registry:
+        util.debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
+        if name not in self._registry_callback:
             raise ValueError(f"Callback {name!r} not found")
-        return self._registry[name](*args, **kwds)  # type: ignore
+        return self._registry_callback[name](*args, **kwds)  # type: ignore
 
-    ##############################
-
-    def start(self) -> None:
-        """Spawn a server process for this manager object"""
-        if self._state.value != State.INITIAL:
-            if self._state.value == State.STARTED:
-                raise ProcessError("Already started server")
-            elif self._state.value == State.SHUTDOWN:
-                raise ProcessError("Manager has shut down")
-            else:
-                raise ProcessError(f"Unknown state {self._state.value!r}")
-
-        # pipe over which we will retrieve address of server
-        reader, writer = connection.Pipe(duplex=False)
-
-        # spawn process which runs a server
-        argss = (self._address, self._authkey, writer, self._picklable)
-        assert hasattr(self._ctx, "Process")
-        self._process = self._ctx.Process(
-            target=type(self)._run_server,
-            args=argss,
-        )
-        ident = ":".join(str(i) for i in self._process._identity)
-        self._process.name = type(self).__name__ + "-" + ident
-        self._process.start()
-
-        # get address of server
-        writer.close()
-        self._address = reader.recv()
-        reader.close()
-
-        # register a finalizer
-        self._state.value = State.STARTED
-        argsf = (self._process, self._address, self._authkey, self._state, self._Client, self._shutdown_timeout)
-        self.shutdown = util.Finalize(self, type(self)._finalize_manager, args=argsf, exitpriority=0)
-
-    @classmethod
-    def _run_server(
-        cls,
-        address: Union[tuple[str, int], str],
-        authkey: Union[bytes, str],
-        writer: object,
-        picklable: bool = False,
-    ) -> None:
-        """Create a server, report its address and run it"""
-        # bpo-36368: protect server process from KeyboardInterrupt signals
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-        # create server
-        server = cls._Server(address, authkey, picklable=picklable)
-
-        # inform parent process of the server's address
-        writer.send(server._address)  # type: ignore
-        writer.close()  # type: ignore
-
-        # run the manager
-        util.info("manager serving at %r", server._address)
-
-        try:
-            server.serve(address=server._address)
-            try:
-                while not server.stop_event.is_set():
-                    server.stop_event.wait(1)
-            except (KeyboardInterrupt, SystemExit):
-                pass
-        finally:
-            if sys.stdout != sys.__stdout__:  # what about stderr?
-                util.debug("resetting stdout, stderr")
-                sys.stdout = sys.__stdout__
-                sys.stderr = sys.__stderr__
-            sys.exit(0)
-
-    @staticmethod
-    def _finalize_manager(
-        process: process.BaseProcess,
-        address: Union[tuple[str, int], str],
-        authkey: Union[bytes, str],
-        state: State,
-        _Client: object,
-        shutdown_timeout: float,
-    ) -> None:
-        """Shutdown the manager process; will be registered as a finalizer"""
-        if process.is_alive():
-            util.info("sending shutdown message to manager")
-            try:
-                conn = _Client(address, authkey=authkey)  # type: ignore
-                try:
-                    dispatch(conn, None, "shutdown")
-                finally:
-                    conn.close()
-            except Exception:
-                pass
-
-            process.join(timeout=shutdown_timeout)
-            if process.is_alive():
-                util.info("manager still alive")
-                if hasattr(process, "terminate"):
-                    util.info("trying to `terminate()` manager process")
-                    process.terminate()
-                    process.join(timeout=shutdown_timeout)
-                    if process.is_alive():
-                        util.info("manager still alive after terminate")
-                        process.kill()
-                        process.join()
-
-        state.value = State.SHUTDOWN
+    def _register(self, c: connection.Connection, name: str, address: Union[tuple[str, int], str]) -> None:
+        """Called by the client to register a callback"""
+        util.debug(f"Server registering '{name}' at {address}")
+        self._registry_address[name] = address
 
     @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
-        return (ManagerProxy, (self._address, self._authkey), {})
+        return (ManagerProxy, (self._address, self._authkey, self._registry_address), {})
 
 
 class ManagerProxy:
@@ -458,25 +327,35 @@ class ManagerProxy:
         self,
         address: Union[tuple[str, int], str],
         authkey: bytes,
+        registry2: dict[str, Union[tuple[str, int], str]],
     ) -> None:
         self._address = address
 
         self._authkey = bytes(authkey) if authkey is not None else None
         self._Client = connection.Client
+        self._registry_address = registry2
 
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
-
-        try:
-            conn = self._Client(self._address, authkey=self._authkey)
-        except ConnectionRefusedError:
-            # The proxy cannot connect to the server
+        address = self._registry_address.get(name)
+        if address is None:
+            util.debug(f"Server does not know about '{name}'")
             return None, False
+        else:
+            util.debug(f"Server calling '{name}' at {address}")
 
+        conn = None
         try:
-            return dispatch(conn, None, "call", (name, *args), kwds)  # type: ignore
+            conn = connection.Client(address, authkey=self._authkey)
+            return dispatch(conn, None, "_call", (name, *args), kwds), True
+        except Exception as e:
+            util.info(f"Error calling '{name}': {e}")
+            # call is broken. remove it.
+            self._registry_address.pop(name, None)
+            return None, False
         finally:
-            conn.close()
+            if conn:
+                conn.close()
 
     def register(self, name: str, callable: Callable) -> None:
         raise RuntimeError("Cannot register a callback on a ManagerProxy")
