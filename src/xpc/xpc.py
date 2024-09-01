@@ -3,7 +3,7 @@ Single-file module for cross-process callbacks.
 
 Hosted at https://github.com/MarcinKonowalczyk/xpc
 
-This module provides a simple way to register callbacks in one process and call them in another. Teh motivating
+This module provides a simple way to register callbacks in one process and call them in another. The motivating
 use-case is to allow registering custom callbacks in an application during testing, or for dynamic instrumentation
 (although the performance hit might be significant).
 
@@ -50,9 +50,6 @@ The main app will then succeed in calling the callback. All the args and kwargs 
 process which registered the callback, and the return values are sent back. **The callback executes in the process
 which registered it.**
 
-NOTE:
-We piggyback a bit on the BaseManager from the multiprocessing module, but we roll our own server class.
-
 TODO:
 - [ ] The communication between manager and server can probably be done much neater -- this could all take place
     over a single connection between the server and the manager.
@@ -65,10 +62,12 @@ TODO:
     getting orphaned(?) This might also improve the performance of `call` from the main manager, since we would
     not need to call to a separate process???
 - [ ] Switch to our own multiprocessing-style logging
+- [ ]
 
 Written by Marcin Konowalczyk.
 """
 
+import os
 import signal
 import sys
 import threading
@@ -89,11 +88,13 @@ else:
     override = lambda x: x
     Literal = Union
 
-import os
 
-DEBUG = os.environ.get("XPC_DEBUG", False)
+__version__ = "0.2.0"
 
-if DEBUG:
+__all__ = ["Manager", "kill_multiprocessing_orphans"]
+
+
+if os.environ.get("XPC_DEBUG", False):
     util.log_to_stderr(10)
     util.info("xpc module loaded")
 
@@ -106,10 +107,6 @@ if DEBUG:
         logger.addHandler(handler)
     except ImportError:
         pass
-
-__version__ = "0.2.0"
-
-__all__ = ["Manager", "kill_multiprocessing_orphans"]
 
 
 def _resolve_address(
@@ -403,8 +400,8 @@ class Manager(_Server):
         server = cls._Server(address, authkey, picklable=picklable)
 
         # inform parent process of the server's address
-        writer.send(server._address)
-        writer.close()
+        writer.send(server._address)  # type: ignore
+        writer.close()  # type: ignore
 
         # run the manager
         util.info("manager serving at %r", server._address)
@@ -429,14 +426,14 @@ class Manager(_Server):
         address: Union[tuple[str, int], str],
         authkey: Union[bytes, str],
         state: State,
-        _Client: connection.Client,
+        _Client: object,
         shutdown_timeout: float,
     ) -> None:
         """Shutdown the manager process; will be registered as a finalizer"""
         if process.is_alive():
             util.info("sending shutdown message to manager")
             try:
-                conn = _Client(address, authkey=authkey)
+                conn = _Client(address, authkey=authkey)  # type: ignore
                 try:
                     dispatch(conn, None, "shutdown")
                 finally:
@@ -457,18 +454,10 @@ class Manager(_Server):
                         process.join()
 
         state.value = State.SHUTDOWN
-        # try:
-        #     del Manager._address_to_local[address]
-        # except KeyError:
-        #     pass
 
     @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
-        return (
-            ManagerProxy,
-            (self._address, self._authkey),
-            {},
-        )
+        return (ManagerProxy, (self._address, self._authkey), {})
 
 
 class ManagerProxy:
@@ -477,7 +466,6 @@ class ManagerProxy:
         address: Union[tuple[str, int], str],
         authkey: bytes,
     ) -> None:
-        address = _resolve_address(address)[0] if address is None else address
         self._address = address
 
         self._authkey = bytes(authkey) if authkey is not None else None
@@ -497,19 +485,7 @@ class ManagerProxy:
         finally:
             conn.close()
 
-    # def register(self, name: str, callable: Callable) -> None:  # type: ignore
-    #     """Register a new callback on the server. Return the token."""
-    #     # Register on the local
-    #     self._registry[name] = callable
-    #     # Register on the remote
-    #     assert self._address is not None
-    #     conn = self._Client(self._address, authkey=self._authkey)
-    #     try:
-    #         dispatch(conn, None, "register", (name, self._address2))
-    #     finally:
-    #         conn.close()
-
-    def register(self, name: str, callable: Callable) -> None:  # type: ignore
+    def register(self, name: str, callable: Callable) -> None:
         raise RuntimeError("Cannot register a callback on a ManagerProxy")
 
     def start(self) -> None:
