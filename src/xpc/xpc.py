@@ -357,15 +357,11 @@ class Manager(_Server):
         reader, writer = connection.Pipe(duplex=False)
 
         # spawn process which runs a server
+        argss = (self._address, self._authkey, writer, self._picklable)
         assert hasattr(self._ctx, "Process")
         self._process = self._ctx.Process(
             target=type(self)._run_server,
-            args=(
-                self._address,
-                self._authkey,
-                writer,
-                self._picklable,
-            ),
+            args=argss,
         )
         ident = ":".join(str(i) for i in self._process._identity)
         self._process.name = type(self).__name__ + "-" + ident
@@ -378,12 +374,8 @@ class Manager(_Server):
 
         # register a finalizer
         self._state.value = State.STARTED
-        self.shutdown = util.Finalize(
-            self,
-            type(self)._finalize_manager,
-            args=(self._process, self._address, self._authkey, self._state, self._Client, self._shutdown_timeout),
-            exitpriority=0,
-        )
+        argsf = (self._process, self._address, self._authkey, self._state, self._Client, self._shutdown_timeout)
+        self.shutdown = util.Finalize(self, type(self)._finalize_manager, args=argsf, exitpriority=0)
 
     @classmethod
     def _run_server(
