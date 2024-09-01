@@ -37,9 +37,9 @@ if __name__ == "__main__":
     )
     manager.start()
 
-    print(f"Server started at {args.address}:{args.port}")
-    print(f"Authkey: {args.authkey}")
-    print(f"Frequency: {args.frequency}")
+    logger.info(f"Server started at {args.address}:{args.port}")
+    logger.info(f"Authkey: {args.authkey}")
+    logger.info(f"Frequency: {args.frequency}")
 
     try:
         while True:
