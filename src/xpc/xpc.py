@@ -57,12 +57,8 @@ TODO:
 - [ ] Better error handling for errors in the callbacks. Currently, the server will just remove the callback from
     the registry no matter what. Thats appropriate if someone registers a callback with wrong signature, but
     what if we want the callback to return an error? We should probably return (value, error, found) from the call.
-- [ ] Do we even need the server to run in a separate process? mutliprocessing.Manager does this, but we could
-    probably just run the server in a separate thread and then we would not need to worry about the server process
-    getting orphaned(?) This might also improve the performance of `call` from the main manager, since we would
-    not need to call to a separate process???
 - [ ] Switch to our own multiprocessing-style logging
-- [ ]
+- [ ] Do we still need the kill-orphans stuff??
 
 Written by Marcin Konowalczyk.
 """
@@ -84,7 +80,9 @@ else:
     Literal = Union
 _T = TypeVar("_T", bound=Callable)
 
-__version__ = "0.3.0"
+_Address = Union[tuple[str, int], str]
+
+__version__ = "0.4.0"
 
 __all__ = ["Manager", "kill_multiprocessing_orphans"]
 
@@ -103,9 +101,9 @@ if os.environ.get("XPC_DEBUG", False):
 
 
 def _resolve_address(
-    address: Union[tuple[str, int], str, None] = None,
+    address: Union[_Address, None] = None,
     family: Union[Literal["AF_INET", "AF_UNIX", "AF_PIPE"], None] = None,  # noqa: F821
-) -> tuple[Union[tuple[str, int], str], Literal["AF_INET", "AF_UNIX", "AF_PIPE"]]:  # noqa: F821
+) -> tuple[_Address, Literal["AF_INET", "AF_UNIX", "AF_PIPE"]]:  # noqa: F821
     """Resolve the address and family for a connection"""
     if family is not None:
         connection._validate_family(family)  # type: ignore
@@ -123,9 +121,9 @@ def _resolve_address(
 class _Server:
     _authkey: bytes
     public: tuple[str, ...]
-    address: Union[tuple[str, int], str]
+    address: _Address
 
-    def serve(self, address: Union[tuple[str, int], str], timeout: Union[float, None] = None) -> None:
+    def serve(self, address: _Address, timeout: Union[float, None] = None) -> None:
         self.stop_event = threading.Event()
         process.current_process()._manager_server = self  # type: ignore
         on_start = threading.Event()
@@ -136,7 +134,7 @@ class _Server:
 
     def accepter(
         self,
-        address: Union[tuple[str, int], str],
+        address: _Address,
         on_start: Union[threading.Event, None] = None,
     ) -> None:
         listener = connection.Listener(address=address, backlog=128)
@@ -216,18 +214,16 @@ def check_state(state: State) -> Callable[[_T], _T]:
 
 
 class Manager(_Server):
-    public = ("_dummy", "_call", "_register")
+    public = ("_dummy", "_call", "_register", "_call2")
 
-    _address: Union[tuple[str, int], str]
-    _address2: Union[tuple[str, int], str]
-    _authkey: bytes
+    _address: _Address
+    _address2: _Address
+    _authkey: AuthenticationString
 
     def __init__(
         self,
-        address: Union[tuple[str, int], str, None] = None,
+        address: Union[_Address, None] = None,
         authkey: Union[bytes, str, None] = None,
-        *,
-        picklable: bool = False,
     ) -> None:
         address = _resolve_address(address)[0] if address is None else address
         self._address = address
@@ -235,15 +231,13 @@ class Manager(_Server):
 
         authkey = authkey.encode() if isinstance(authkey, str) else authkey
         authkey = process.current_process().authkey if authkey is None else authkey
-        authkey = bytes(authkey) if picklable else AuthenticationString(authkey)
-        self._picklable = picklable
-        self._authkey = authkey
+        self._authkey = AuthenticationString(authkey)
 
         self._state = State.INITIAL
         self._Listener, self._Client = connection.Listener, connection.Client
 
         self._registry_callback: dict[str, Callable] = {}
-        self._registry_address: dict[str, Union[tuple[str, int], str]] = {}
+        self._registry_address: dict[str, _Address] = {}
 
     @check_state(State.INITIAL)
     def connect(self) -> None:
@@ -306,53 +300,44 @@ class Manager(_Server):
         pass
 
     def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
-        """This is the method that is called by the server to call a callback"""
+        """Called by the server to call a callback"""
         util.debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
         if name not in self._registry_callback:
             raise ValueError(f"Callback {name!r} not found")
         return self._registry_callback[name](*args, **kwds)  # type: ignore
 
-    def _register(self, c: connection.Connection, name: str, address: Union[tuple[str, int], str]) -> None:
-        """Called by the client to register a callback"""
+    def _call2(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+        """Called by proxy to call a callback"""
+        return self.call(name, *args, **kwds)
+
+    def _register(self, c: connection.Connection, name: str, address: _Address) -> None:
+        """Called by the client to register a callback. Proxy needs another lever of indirection because
+        it does not hold the registry of callbacks."""
         util.debug(f"Server registering '{name}' at {address}")
         self._registry_address[name] = address
 
     @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
-        return (ManagerProxy, (self._address, self._authkey, self._registry_address), {})
+        return (ManagerProxy, (self._address, bytes(self._authkey)), {})
 
 
 class ManagerProxy:
     def __init__(
         self,
-        address: Union[tuple[str, int], str],
+        address: _Address,
         authkey: bytes,
-        registry2: dict[str, Union[tuple[str, int], str]],
     ) -> None:
         self._address = address
 
         self._authkey = bytes(authkey) if authkey is not None else None
         self._Client = connection.Client
-        self._registry_address = registry2
 
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
-        address = self._registry_address.get(name)
-        if address is None:
-            util.debug(f"Server does not know about '{name}'")
-            return None, False
-        else:
-            util.debug(f"Server calling '{name}' at {address}")
-
         conn = None
         try:
-            conn = connection.Client(address, authkey=self._authkey)
-            return dispatch(conn, None, "_call", (name, *args), kwds), True
-        except Exception as e:
-            util.info(f"Error calling '{name}': {e}")
-            # call is broken. remove it.
-            self._registry_address.pop(name, None)
-            return None, False
+            conn = connection.Client(self._address, authkey=self._authkey)
+            return dispatch(conn, None, "_call2", (name, *args), kwds)  # type: ignore
         finally:
             if conn:
                 conn.close()
