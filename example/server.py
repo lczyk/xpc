@@ -8,21 +8,11 @@ sys.path.append(str(__project_root__ / "src"))
 from xpc import Manager
 
 if __name__ == "__main__":
-    import logging
-
-    logger = logging.getLogger("server")
-    handler = logging.StreamHandler()
-    format = "%(asctime)s %(levelname)s %(message)s"
-    try:
-        import colorlog
-
-        handler.setFormatter(colorlog.ColoredFormatter("%(asctime)s %(log_color)s%(levelname)s%(reset)s %(message)s"))
-    except ImportError:
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-
     import argparse
+
+    from _logging import setup_logging
+
+    logger = setup_logging()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--address", default="localhost")
@@ -46,7 +36,6 @@ if __name__ == "__main__":
             _name = "my_callback"
             _args = (1, 2, 3)
             _kwargs = {"hello": "world"}
-            # logger.info(f"calling '{_name}' with args: {_args} and kwargs: {_kwargs}")
             value, found = manager.call(_name, *_args, **_kwargs)
             if found:
                 logger.info(f"callback returned: {value}")
