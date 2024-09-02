@@ -78,7 +78,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = ["Manager"]
 
@@ -268,7 +268,7 @@ class Manager(_Server):
         self._state = State.CLIENT_STARTED
 
     @_check_state(State.INITIAL)
-    def start_or_connect(self, _depth: int = 0) -> None:
+    def start_or_connect(self, timeout: Union[float, None] = None, _depth: int = 0) -> None:
         """Start the server if we are the server, or connect to the server if we are the client"""
         _debug(f"Starting or connecting to server. Depth: {_depth}")
         # Make a call to the server to see if it is running
@@ -283,12 +283,15 @@ class Manager(_Server):
         if running:
             _debug("Server is running")
             # Server is running. Connect to it.
-            self.connect()
+            self.connect(timeout=timeout)
         else:
             _debug("Server is not running")
             # Server is not running. Try to start it.
             try:
-                self.start(timeout=0.1)
+                if _depth == 0:
+                    self.start(timeout=0.1)
+                else:
+                    self.start(timeout=timeout)
             except Exception as e:
                 if isinstance(e, TimeoutError) and _depth == 0:
                     _info("Server start contention. Retrying.")
