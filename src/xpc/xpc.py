@@ -150,6 +150,8 @@ class _Server:
             return
         if on_start:
             on_start.set()
+        # from concurrent.futures import ThreadPoolExecutor
+        # pool = ThreadPoolExecutor(max_workers=4)
         while True:
             try:
                 c = listener.accept()
@@ -159,6 +161,8 @@ class _Server:
             t.name = "handle_request"
             t.daemon = True
             t.start()
+
+            # future = pool.submit(self.handle_request, c)
 
     def handle_request(self, conn: connection.Connection) -> None:
         """Handle a new connection"""
