@@ -1,10 +1,12 @@
+from typing import Optional
+
 import pytest
 
 from xpc import Manager
 
 
 def start_man() -> Manager:
-    man: Manager | None = Manager(
+    man: Optional[Manager] = Manager(
         address=("localhost", 9999),
         authkey="password",
     )

@@ -80,7 +80,7 @@ __version__ = "0.7.3"
 
 __all__ = ["Manager"]
 
-_logger: "logging.Logger | None" = None
+_logger: "Optional[logging.Logger]" = None
 
 _debug = lambda msg, *args: _logger.log(10, msg, *args, stacklevel=2) if _logger else None
 _info = lambda msg, *args: _logger.log(20, msg, *args, stacklevel=2) if _logger else None
@@ -127,7 +127,7 @@ def conn_and_dispatch(
     name: str,
     args: tuple[Any, ...] = (),
     kwds: Optional[dict[str, Any]] = {},  # noqa: B006
-) -> tuple[Any, Exception | None]:
+) -> tuple[Any, Optional[Exception]]:
     if kwds is None:
         kwds = {}
     conn = None
@@ -148,7 +148,7 @@ def conn_and_dispatch(
 class _Server:
     _authkey: bytes
     public: tuple[str, ...]
-    _this_address: _Address | None
+    _this_address: Optional[_Address]
 
     def shutdown(self) -> None:
         """Shutdown the server. Will be overridden in `serve` by the finalizer."""
@@ -275,7 +275,7 @@ class _Server:
 class Manager(_Server):
     _address: _Address
     _address2: _Address
-    _this_address: _Address | None
+    _this_address: Optional[_Address]
     _authkey: AuthenticationString
 
     def __init__(
@@ -332,9 +332,9 @@ class Manager(_Server):
         assert self._this_address is None, "Manager already started"
         _debug(f"Starting or connecting to server. Depth: {_depth}")
         # Make a call to the server to see if it is running
-        running, _ = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
 
-        if running:
+        if not exc:
             _debug("Server is running")
             # Server is running. Connect to it.
             self.connect(timeout=timeout)
@@ -409,8 +409,8 @@ class Manager(_Server):
 
     public = ("_dummy", "_call", "_register", "_call2", "_shutdown")
 
-    def _dummy(self, c: connection.Connection) -> Literal[True]:
-        return True
+    def _dummy(self, c: connection.Connection) -> None:
+        pass
 
     def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by the server to call a callback"""
