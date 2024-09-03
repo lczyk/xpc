@@ -59,15 +59,13 @@ TODO:
 Written by Marcin Konowalczyk.
 """
 
-import enum
 import os
 import threading
 import traceback
-from functools import wraps
-from multiprocessing import connection, process
-from multiprocessing.managers import dispatch  # type: ignore
+from multiprocessing import connection, process, util
+from multiprocessing.managers import dispatch as _dispatch  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 if TYPE_CHECKING:
     from typing_extensions import Literal, override
@@ -78,7 +76,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 __all__ = ["Manager"]
 
@@ -123,46 +121,114 @@ def _resolve_address(
     return address, family  # type: ignore
 
 
+def conn_and_dispatch(
+    address: _Address,
+    authkey: bytes,
+    name: str,
+    args: tuple[Any, ...] = (),
+    kwds: Optional[dict[str, Any]] = {},  # noqa: B006
+) -> tuple[Any, Exception | None]:
+    if kwds is None:
+        kwds = {}
+    conn = None
+    exc = None
+    rv = None
+    try:
+        conn = connection.Client(address, authkey=authkey)
+        rv = _dispatch(conn, None, name, args, kwds)
+    except Exception as e:
+        exc = e
+    finally:
+        if conn:
+            conn.close()
+
+    return rv, exc
+
+
 class _Server:
     _authkey: bytes
     public: tuple[str, ...]
-    address: _Address
+    _this_address: _Address | None
 
-    def serve(self, address: _Address, timeout: Union[float, None] = None) -> None:
+    def shutdown(self) -> None:
+        """Shutdown the server. Will be overridden in `serve` by the finalizer."""
+        pass
+
+    def serve(self, address: _Address, authkey: bytes, timeout: Union[float, None] = None) -> None:
         self.stop_event = threading.Event()
         process.current_process()._manager_server = self  # type: ignore
         on_start = threading.Event()
-        accepter = threading.Thread(target=self.accepter, args=(address, on_start))
+        accepter = threading.Thread(target=self.accepter, args=(address, authkey, on_start))
         accepter.daemon = True
         accepter.start()
         if not on_start.wait(timeout=timeout):
             raise TimeoutError("Server failed to start")
 
+        args = (accepter, self.stop_event, 0.25, address, authkey)
+        self.shutdown = util.Finalize(self, self._finalize, args=args, exitpriority=0)  # type: ignore
+
+    @staticmethod
+    def _finalize(
+        accepter: threading.Thread,
+        stop_event: threading.Event,
+        shutdown_timeout: float,
+        address: _Address,
+        authkey: bytes,
+    ) -> None:
+        _debug("Finalizing server")
+        if accepter.is_alive():
+            _info("Accepter is still alive. Stopping it.")
+            stop_event.set()
+
+            # Make a dummy call to the server to make it notice the stop event
+            _, exc = conn_and_dispatch(address, authkey, "_dummy")
+            if exc:
+                _info(f"Failed to stop server: {exc!r}")
+
+            accepter.join(timeout=shutdown_timeout)
+            if accepter.is_alive():
+                _info("Accepter is still alive!!")
+                # Final attempt at killing the accepter thread
+                try:
+                    accepter._stop()  # type: ignore
+                except Exception:
+                    pass
+
     def accepter(
         self,
         address: _Address,
+        authkey: bytes,
         on_start: Union[threading.Event, None] = None,
     ) -> None:
+        listener = None
         try:
             listener = connection.Listener(address=address, backlog=128)
+            try:
+                if on_start:
+                    on_start.set()
+                while True:
+                    if self.stop_event.is_set():
+                        _debug("Server stop event set. Stopping.")
+                        break
+                    try:
+                        c = listener.accept()
+                    except OSError:
+                        continue
+                    t = threading.Thread(target=self.handle_request, args=(c,))
+                    t.name = "handle_request"
+                    t.daemon = True
+                    t.start()
+            except Exception as e:
+                _info(f"Server failed: {e!r}")
         except Exception as e:
             _info(f"Failed to create listener on {address}: {e!r}")
             return
-        if on_start:
-            on_start.set()
-        # from concurrent.futures import ThreadPoolExecutor
-        # pool = ThreadPoolExecutor(max_workers=4)
-        while True:
-            try:
-                c = listener.accept()
-            except OSError:
-                continue
-            t = threading.Thread(target=self.handle_request, args=(c,))
-            t.name = "handle_request"
-            t.daemon = True
-            t.start()
-
-            # future = pool.submit(self.handle_request, c)
+        finally:
+            if listener:
+                try:
+                    listener.close()
+                except Exception as e:
+                    _info(f"Failed to close listener: {e!r}")
 
     def handle_request(self, conn: connection.Connection) -> None:
         """Handle a new connection"""
@@ -206,30 +272,10 @@ class _Server:
             _info(" ... exception was %r", e)
 
 
-class State(enum.Enum):
-    INITIAL = 0
-    SERVER_STARTED = 1
-    CLIENT_STARTED = 3
-
-
-def _check_state(state: State) -> Callable[[_T], _T]:
-    def decorator(func: _T) -> _T:
-        @wraps(func)
-        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-            __tracebackhide__ = True
-            assert (
-                self._state == state
-            ), f"Must be in state {state} to call {func.__name__}. Current state: {self._state}"
-            return func(self, *args, **kwargs)
-
-        return wrapper  # type: ignore
-
-    return decorator
-
-
 class Manager(_Server):
     _address: _Address
     _address2: _Address
+    _this_address: _Address | None
     _authkey: AuthenticationString
 
     def __init__(
@@ -240,49 +286,53 @@ class Manager(_Server):
         address = _resolve_address(address)[0] if address is None else address
         self._address = address
         self._address2 = _resolve_address()[0]  # Also create an address for the reverse connection
+        self._this_address = None
 
         authkey = authkey.encode() if isinstance(authkey, str) else authkey
         authkey = process.current_process().authkey if authkey is None else authkey
         self._authkey = AuthenticationString(authkey)
 
-        self._state = State.INITIAL
         self._Listener, self._Client = connection.Listener, connection.Client
 
         self._registry_callback: dict[str, Callable] = {}
         self._registry_address: dict[str, _Address] = {}
 
-    @_check_state(State.INITIAL)
+    @property
+    def _is_server(self) -> bool:
+        return self._this_address == self._address
+
+    @property
+    def _is_client(self) -> bool:
+        return self._this_address == self._address2
+
     def start(self, timeout: Union[float, None] = None) -> None:
         """Spawn a server process for this manager object"""
-        self.serve(address=self._address, timeout=timeout)  # Start the main server
+        assert self._this_address is None, "Manager already started"
+        self.serve(address=self._address, authkey=self._authkey, timeout=timeout)  # Start the main server
 
         # Make a dummy call to the main server
-        conn = connection.Client(self._address, authkey=self._authkey)
-        dispatch(conn, None, "_dummy")
-        self._state = State.SERVER_STARTED
+        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        if exc:
+            raise exc
+        self._this_address = self._address
 
-    @_check_state(State.INITIAL)
     def connect(self, timeout: Union[float, None] = None) -> None:
         """Connect manager object to the server process"""
-        self.serve(address=self._address2, timeout=timeout)  # Start the callback server
+        assert self._this_address is None, "Manager already started"
+        self.serve(address=self._address2, authkey=self._authkey, timeout=timeout)  # Start the callback server
 
         # Make a dummy call to the main server to make sure it is running
-        conn = connection.Client(self._address, authkey=self._authkey)
-        dispatch(conn, None, "_dummy")
-        self._state = State.CLIENT_STARTED
+        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        if exc:
+            raise exc
+        self._this_address = self._address2
 
-    @_check_state(State.INITIAL)
     def start_or_connect(self, timeout: Union[float, None] = None, _depth: int = 0) -> None:
         """Start the server if we are the server, or connect to the server if we are the client"""
+        assert self._this_address is None, "Manager already started"
         _debug(f"Starting or connecting to server. Depth: {_depth}")
         # Make a call to the server to see if it is running
-        running = False
-        try:
-            conn = connection.Client(self._address, authkey=self._authkey)
-            dispatch(conn, None, "_dummy")
-            running = True
-        except Exception:
-            pass
+        running, _ = conn_and_dispatch(self._address, self._authkey, "_dummy")
 
         if running:
             _debug("Server is running")
@@ -309,28 +359,26 @@ class Manager(_Server):
 
     def register(self, name: str, callable: Callable) -> None:
         """Register a new callback on the server. Return the token."""
-        if self._state == State.INITIAL:
-            raise RuntimeError("Manager not started. Call start() or connect() first.")
-        elif self._state == State.CLIENT_STARTED:
+        assert self._this_address is not None, "Manager not started. Call start() or connect() first."
+
+        if self._is_client:
             _debug(f"Registering '{name}'")
 
             # Register on the local
             self._registry_callback[name] = callable
 
             # Register on the server
-            conn = self._Client(self._address, authkey=self._authkey)
-            try:
-                dispatch(conn, None, "_register", (name, self._address2))
-            finally:
-                conn.close()
-        elif self._state == State.SERVER_STARTED:
+            _, exc = conn_and_dispatch(self._address, self._authkey, "_register", (name, self._address2))
+            if exc:
+                print(f"Failed to register '{name}': {exc}")
+
+        else:
             _debug(f"Registering '{name}' locally")
             self._registry_callback[name] = callable
 
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback"""
-        if self._state == State.INITIAL:
-            raise RuntimeError("Manager not started. Call start() or connect() first.")
+        assert self._this_address is not None, "Manager not started. Call start() or connect() first."
 
         callback = self._registry_callback.get(name)
         if callback:
@@ -340,56 +388,29 @@ class Manager(_Server):
         address = self._registry_address.get(name)
         if address:
             _debug(f"Calling '{name}' at {address}")
-            conn = None
-            try:
-                conn = connection.Client(address, authkey=self._authkey)
-                return dispatch(conn, None, "_call", (name, *args), kwds), True
-            except Exception as e:
-                _info(f"Error calling '{name}': {e}")
+            rv, exc = conn_and_dispatch(address, self._authkey, "_call", (name, *args), kwds)
+
+            if exc:
+                _info(f"Error calling '{name}': {exc!r}")
                 self._registry_address.pop(name, None)  # XXX: call is broken. remove it.
                 return None, False
-            finally:
-                if conn:
-                    conn.close()
 
-        # We don't have the callback or the address for it
-        if self._state == State.SERVER_STARTED:
-            # We are the server. We should know about all the callbacks. If we don't, the callback is not registered.
-            _debug(f"Server does not know about '{name}'")
-            return None, False
+            return rv, True
 
-        elif self._state == State.CLIENT_STARTED:
+        if self._is_client:
             # Try to call the callback remotely
             _debug(f"Client calling '{name}' remotely")
-            conn = None
-            try:
-                conn = connection.Client(self._address, authkey=self._authkey)
-                return dispatch(conn, None, "_call2", (name, *args), kwds)  # type: ignore
-            finally:
-                if conn:
-                    conn.close()
+            rv, _ = conn_and_dispatch(self._address, self._authkey, "_call2", (name, *args), kwds)
+            return rv  # type: ignore
 
-    def shutdown(self) -> None:
-        """Shutdown the manager"""
-        if self._state == State.SERVER_STARTED:
-            address = self._address
-        elif self._state == State.CLIENT_STARTED:
-            address = self._address2
+        # We are the server. We should know about all the callbacks. If we don't, the callback is not registered.
+        _debug(f"Server does not know about '{name}'")
+        return None, False
 
-        conn = None
-        try:
-            conn = connection.Client(address, authkey=self._authkey)
-            dispatch(conn, None, "_shutdown")
-        except Exception as e:
-            _info(f"Error shutting down server: {e!r}")
-        finally:
-            if conn:
-                conn.close()
+    public = ("_dummy", "_call", "_register", "_call2", "_shutdown")
 
-    public = ("_dummy", "_call", "_call2", "_register", "_shutdown")
-
-    def _dummy(self, c: connection.Connection) -> None:
-        pass
+    def _dummy(self, c: connection.Connection) -> Literal[True]:
+        return True
 
     def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by the server to call a callback"""
@@ -411,11 +432,6 @@ class Manager(_Server):
     @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
         return (ManagerProxy, (self._address, bytes(self._authkey)), {})
-
-    def _shutdown(self, c: connection.Connection) -> None:
-        """Called by the client to shutdown the server"""
-        c.close()
-        self.stop_event.set()
 
     def __del__(self) -> None:
         try:
@@ -440,13 +456,8 @@ class ManagerProxy:
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
         _debug(f"Proxy calling '{name}'")
-        conn = None
-        try:
-            conn = connection.Client(self._address, authkey=self._authkey)
-            return dispatch(conn, None, "_call2", (name, *args), kwds)  # type: ignore
-        finally:
-            if conn:
-                conn.close()
+        rv, _ = conn_and_dispatch(self._address, self._authkey, "_call2", (name, *args), kwds)
+        return rv  # type: ignore
 
     def register(self, name: str, callable: Callable) -> None:
         raise RuntimeError("Cannot register a callback on a ManagerProxy")
