@@ -189,7 +189,7 @@ class _Server:
             if accepter.is_alive():
                 _info("Accepter is still alive!!")
                 # Final attempt at killing the accepter thread
-                try:
+                try:  # noqa: SIM105, RUF100
                     accepter._stop()  # type: ignore
                 except Exception:
                     pass
@@ -434,7 +434,7 @@ class Manager(_Server):
         return (ManagerProxy, (self._address, bytes(self._authkey)), {})
 
     def __del__(self) -> None:
-        try:
+        try:  # noqa: SIM105, RUF100
             self.shutdown()
         except Exception:
             pass
