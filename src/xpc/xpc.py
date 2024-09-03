@@ -369,7 +369,24 @@ class Manager(_Server):
                 if conn:
                     conn.close()
 
-    public = ("_dummy", "_call", "_register", "_call2", "_shutdown")
+    def shutdown(self) -> None:
+        """Shutdown the manager"""
+        if self._state == State.SERVER_STARTED:
+            address = self._address
+        elif self._state == State.CLIENT_STARTED:
+            address = self._address2
+
+        conn = None
+        try:
+            conn = connection.Client(address, authkey=self._authkey)
+            dispatch(conn, None, "_shutdown")
+        except Exception as e:
+            _info(f"Error shutting down server: {e!r}")
+        finally:
+            if conn:
+                conn.close()
+
+    public = ("_dummy", "_call", "_call2", "_register", "_shutdown")
 
     def _dummy(self, c: connection.Connection) -> None:
         pass
@@ -394,23 +411,6 @@ class Manager(_Server):
     @override
     def __reduce__(self) -> tuple[type, tuple, dict]:
         return (ManagerProxy, (self._address, bytes(self._authkey)), {})
-
-    def shutdown(self) -> None:
-        """Shutdown the manager"""
-        if self._state == State.SERVER_STARTED:
-            address = self._address
-        elif self._state == State.CLIENT_STARTED:
-            address = self._address2
-
-        conn = None
-        try:
-            conn = connection.Client(address, authkey=self._authkey)
-            dispatch(conn, None, "_shutdown")
-        except Exception as e:
-            _info(f"Error shutting down server: {e!r}")
-        finally:
-            if conn:
-                conn.close()
 
     def _shutdown(self, c: connection.Connection) -> None:
         """Called by the client to shutdown the server"""
