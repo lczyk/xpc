@@ -76,7 +76,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 __all__ = ["Manager"]
 
@@ -388,7 +388,14 @@ class Manager(_Server):
         callback = self._registry_callback.get(name)
         if callback:
             _debug(f"Calling '{name}' locally")
-            return self._registry_callback[name](*args, **kwds), True
+            try:
+                rv = self._registry_callback[name](*args, **kwds)
+            except Exception as e:
+                _info(f"Error calling '{name}': {e!r}")
+                self._registry_callback.pop(name, None)
+                return None, False
+
+            return rv, True
 
         address = self._registry_address.get(name)
         if address:
