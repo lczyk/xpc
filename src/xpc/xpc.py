@@ -76,7 +76,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 __all__ = ["Manager"]
 
@@ -357,7 +357,7 @@ class Manager(_Server):
                     raise
                 self.start_or_connect(_depth=_depth + 1)
 
-    def register(self, name: str, callable: Callable) -> None:
+    def register(self, name: str, callable: Callable) -> bool:
         """Register a new callback on the server. Return the token."""
         assert self._this_address is not None, "Manager not started. Call start() or connect() first."
 
@@ -370,11 +370,16 @@ class Manager(_Server):
             # Register on the server
             _, exc = conn_and_dispatch(self._address, self._authkey, "_register", (name, self._address2))
             if exc:
-                print(f"Failed to register '{name}': {exc}")
+                # If we failed to register on the server, remove the local registration
+                _info(f"Failed to register '{name}': {exc!r}")
+                self._registry_callback.pop(name, None)
+                return False
 
         else:
             _debug(f"Registering '{name}' locally")
             self._registry_callback[name] = callable
+
+        return True
 
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback"""
