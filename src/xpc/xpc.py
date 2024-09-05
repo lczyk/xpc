@@ -55,6 +55,9 @@ TODO:
 - [ ] Better error handling for errors in the callbacks. Currently, the server will just remove the callback from
     the registry no matter what. Thats appropriate if someone registers a callback with wrong signature, but
     what if we want the callback to return an error? We should probably return (value, error, found) from the call.
+- [ ] Stop and start manager.
+- [ ] Register callbacks for N calls only / with expiry time.
+- [ ] Cross-process semaphores and locks.
 
 Written by Marcin Konowalczyk.
 """
@@ -76,7 +79,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 
 __all__ = ["Manager"]
 
@@ -419,7 +422,7 @@ class Manager(_Server):
         _debug(f"Server does not know about '{name}'")
         return None, False
 
-    public = ("_dummy", "_call", "_register", "_call2", "_shutdown")
+    public = ("_dummy", "_call", "_register", "_call2")
 
     def _dummy(self, c: connection.Connection) -> None:
         pass
@@ -461,7 +464,6 @@ class Manager(_Server):
 class ManagerProxy:
     def __init__(self, address: _Address, authkey: bytes) -> None:
         self._address = address
-
         self._authkey = bytes(authkey) if authkey is not None else None
         self._Client = connection.Client
 
