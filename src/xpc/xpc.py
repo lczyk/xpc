@@ -63,11 +63,13 @@ Written by Marcin Konowalczyk.
 """
 
 import os
+import socket
 import threading
 import traceback
 from multiprocessing import connection, process, util
-from multiprocessing.managers import dispatch as _dispatch  # type: ignore
+from multiprocessing.managers import convert_to_error as _convert_to_error  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
+from pickle import UnpicklingError
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 if TYPE_CHECKING:
@@ -79,9 +81,9 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
-__all__ = ["Manager"]
+__all__ = ["Manager", "find_free_port"]
 
 _logger: "Optional[logging.Logger]" = None
 
@@ -106,7 +108,7 @@ if os.environ.get("XPC_DEBUG", False):
     _info("xpc module loaded")
 
 
-def _resolve_address(
+def resolve_address(
     address: Union[_Address, None] = None,
     family: Union[Literal["AF_INET", "AF_UNIX", "AF_PIPE"], None] = None,  # noqa: F821
 ) -> tuple[_Address, Literal["AF_INET", "AF_UNIX", "AF_PIPE"]]:  # noqa: F821
@@ -124,21 +126,39 @@ def _resolve_address(
     return address, family  # type: ignore
 
 
-def conn_and_dispatch(
-    address: _Address,
-    authkey: bytes,
+def dispatch(
+    c: connection.Connection,
     name: str,
     args: tuple[Any, ...] = (),
-    kwds: Optional[dict[str, Any]] = {},  # noqa: B006
+    kwds: dict[str, Any] = {},  # noqa: B006
+    timeout: float | None = None,
+) -> Any:
+    """Send a message to manager using connection `c` and return response"""
+    c.send((None, name, args, kwds))
+    if timeout is not None and not c.poll(timeout):
+        raise TimeoutError("Connection timed out")
+    kind, result = c.recv()
+    if kind == "#RETURN":
+        return result
+    raise _convert_to_error(kind, result)
+
+
+def conn_and_dispatch(
+    address: _Address,
+    authkey: bytes | None,
+    name: str,
+    args: tuple[Any, ...] = (),
+    kwds: dict[str, Any] = {},  # noqa: B006
+    timeout: float | None = None,
 ) -> tuple[Any, Optional[Exception]]:
-    if kwds is None:
-        kwds = {}
     conn = None
     exc = None
     rv = None
     try:
+        _debug(f"!! Connecting to {address}")
         conn = connection.Client(address, authkey=authkey)
-        rv = _dispatch(conn, None, name, args, kwds)
+        _debug(f"!! Connected to {address}")
+        rv = dispatch(conn, name, args, kwds, timeout)
     except Exception as e:
         exc = e
     finally:
@@ -286,9 +306,9 @@ class Manager(_Server):
         address: Union[_Address, None] = None,
         authkey: Union[bytes, str, None] = None,
     ) -> None:
-        address = _resolve_address(address)[0] if address is None else address
+        address = resolve_address(address)[0] if address is None else address
         self._address = address
-        self._address2 = _resolve_address()[0]  # Also create an address for the reverse connection
+        self._address2 = resolve_address()[0]  # Also create an address for the reverse connection
         self._this_address = None
 
         authkey = authkey.encode() if isinstance(authkey, str) else authkey
@@ -312,9 +332,7 @@ class Manager(_Server):
         """Spawn a server process for this manager object"""
         assert self._this_address is None, "Manager already started"
         self.serve(address=self._address, authkey=self._authkey, timeout=timeout)  # Start the main server
-
-        # Make a dummy call to the main server
-        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        exc = self._dummy2(timeout=timeout)
         if exc:
             raise exc
         self._this_address = self._address
@@ -323,9 +341,7 @@ class Manager(_Server):
         """Connect manager object to the server process"""
         assert self._this_address is None, "Manager already started"
         self.serve(address=self._address2, authkey=self._authkey, timeout=timeout)  # Start the callback server
-
-        # Make a dummy call to the main server to make sure it is running
-        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        exc = self._dummy2(timeout=timeout)
         if exc:
             raise exc
         self._this_address = self._address2
@@ -335,7 +351,7 @@ class Manager(_Server):
         assert self._this_address is None, "Manager already started"
         _debug(f"Starting or connecting to server. Depth: {_depth}")
         # Make a call to the server to see if it is running
-        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy")
+        exc = self._dummy2(timeout=timeout)
 
         if not exc:
             _debug("Server is running")
@@ -359,6 +375,23 @@ class Manager(_Server):
                 if _depth > 0:
                     raise
                 self.start_or_connect(_depth=_depth + 1)
+
+    def _dummy2(self, timeout: Union[float, None] = None) -> Exception | None:
+        """Make a dummy call to the server to make sure it is running"""
+        if timeout is None:
+            # We must have a timeout here to avoid deadlock
+            timeout = 0.25
+
+        # We have to work around a possible deadlock in multiprocessing.connection.Client
+        # by trying to connect without authkey first. We then skip the buggy part of the Client
+        # and raise an UnpicklingError in the return. If that happens we can retry with the
+        # actual authkey. This is a bit hacky but it works. Its ok since we do it only on _dummy
+        # calls..?
+
+        _, exc = conn_and_dispatch(self._address, None, "_dummy", timeout=timeout)
+        if exc and isinstance(exc, UnpicklingError):
+            _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy", timeout=timeout)
+        return exc
 
     def register(self, name: str, callable: Callable) -> bool:
         """Register a new callback on the server. Return the token."""
@@ -481,6 +514,15 @@ class ManagerProxy:
 
     def connect(self) -> None:
         raise RuntimeError("Cannot connect a ManagerProxy. Connect the main Manager object instead.")
+
+
+def find_free_port(host: str = "localhost") -> int:
+    """Connect to a socket and return the port number"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        address = s.getsockname()
+        assert isinstance(address, tuple) and len(address) == 2 and isinstance(address[1], int)
+        return address[1]
 
 
 __license__ = """

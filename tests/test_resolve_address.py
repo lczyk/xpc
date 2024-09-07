@@ -2,12 +2,11 @@ import sys
 
 import pytest
 
-from xpc.xpc import _resolve_address as resolve_address
+from xpc.xpc import resolve_address
 
 
 def test_resolve_address() -> None:
     _address, _family = resolve_address()
-    ...
 
 
 def test_resolve_address_af_inet() -> None:
