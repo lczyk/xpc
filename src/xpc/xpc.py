@@ -66,22 +66,23 @@ import os
 import socket
 import threading
 import traceback
-from multiprocessing import connection, process, util
+from multiprocessing import connection as _c
+from multiprocessing import process, util
 from multiprocessing.managers import convert_to_error as _convert_to_error  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
-from pickle import UnpicklingError
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, no_type_check
 
 if TYPE_CHECKING:
     from typing_extensions import Literal, override
 else:
     override = lambda x: x
     Literal = Union
+
 _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 __all__ = ["Manager", "find_free_port"]
 
@@ -108,26 +109,120 @@ if os.environ.get("XPC_DEBUG", False):
     _info("xpc module loaded")
 
 
+@no_type_check
 def resolve_address(
     address: Union[_Address, None] = None,
     family: Union[Literal["AF_INET", "AF_UNIX", "AF_PIPE"], None] = None,  # noqa: F821
 ) -> tuple[_Address, Literal["AF_INET", "AF_UNIX", "AF_PIPE"]]:  # noqa: F821
     """Resolve the address and family for a connection"""
     if family is not None:
-        connection._validate_family(family)  # type: ignore
+        _c._validate_family(family)
 
     if address is None and family is None:  # Default address and family
-        family = connection.default_family  # type: ignore
-        address = connection.arbitrary_address(family)  # type: ignore
+        family = _c.default_family
+        address = _c.arbitrary_address(family)
     elif address is None:  # Resolve the address based on the family
-        address = connection.arbitrary_address(family)  # type: ignore
+        address = _c.arbitrary_address(family)
     elif family is None:  # Resolve the family based on the address
-        family = connection.address_type(address)  # type: ignore
-    return address, family  # type: ignore
+        family = _c.address_type(address)
+    return address, family
+
+
+@no_type_check
+def deliver_challenge(
+    conn: _c.Connection,
+    authkey: bytes,
+    digest_name: str = "sha256",
+    timeout: float | None = None,
+) -> None:
+    """Re-implementation of the deliver_challenge function from multiprocessing.connection, with the
+    timeout on conn.recv_bytes."""
+    if not isinstance(authkey, bytes):
+        raise ValueError(f"Authkey must be bytes, not {type(authkey)!s}")
+    assert _c.MESSAGE_LENGTH > _c._MD5ONLY_MESSAGE_LENGTH, "protocol constraint"
+    message = os.urandom(_c.MESSAGE_LENGTH)
+    message = b"{%s}%s" % (digest_name.encode("ascii"), message)
+    # Even when sending a challenge to a legacy client that does not support
+    # digest prefixes, they'll take the entire thing as a challenge and
+    # respond to it with a raw HMAC-MD5.
+    conn.send_bytes(_c._CHALLENGE + message)
+    if timeout is not None and not conn.poll(timeout):
+        raise TimeoutError("Connection timed out")
+    response = conn.recv_bytes(256)  # reject large message
+    try:
+        _c._verify_challenge(authkey, message, response)
+    except _c.AuthenticationError:
+        conn.send_bytes(_c._FAILURE)
+        raise
+    else:
+        conn.send_bytes(_c._WELCOME)
+
+
+@no_type_check
+def answer_challenge(
+    conn: _c.Connection,
+    authkey: bytes,
+    timeout: float | None = None,
+) -> None:
+    """Re-implementation of the answer_challenge function from multiprocessing.connection with the
+    timeout on conn.recv_bytes."""
+    if not isinstance(authkey, bytes):
+        raise ValueError(f"Authkey must be bytes, not {type(authkey)!s}")
+    if timeout is not None and not conn.poll(timeout):
+        raise TimeoutError("Connection timed out")
+    message = conn.recv_bytes(256)  # reject large message
+    if not message.startswith(_c._CHALLENGE):
+        raise _c.AuthenticationError(f"Protocol error, expected challenge: {message=}")
+    message = message[len(_c._CHALLENGE) :]
+    if len(message) < _c._MD5ONLY_MESSAGE_LENGTH:
+        raise _c.AuthenticationError("challenge too short: {len(message)} bytes")
+    digest = _c._create_response(authkey, message)
+    conn.send_bytes(digest)
+    if timeout is not None and not conn.poll(timeout):
+        raise TimeoutError("Connection timed out")
+    response = conn.recv_bytes(256)  # reject large message
+    if response != _c._WELCOME:
+        raise _c.AuthenticationError("digest sent was rejected")
+
+
+@no_type_check
+def Client(
+    address: _Address,
+    authkey: bytes | None = None,
+    timeout: float | None = None,
+) -> _c.Connection:
+    """Re-implemented version of the Client function from multiprocessing.connection with the timeout
+    option."""
+    c = _c.PipeClient(address) if _c.address_type(address) == "AF_PIPE" else _c.SocketClient(address)
+
+    if authkey is not None and not isinstance(authkey, bytes):
+        raise TypeError("authkey should be a byte string")
+
+    if authkey is not None:
+        answer_challenge(c, authkey, timeout=timeout)
+        deliver_challenge(c, authkey, timeout=timeout)
+
+    return c
+
+
+class Listener(_c.Listener):
+    @override
+    def accept(self, timeout: float | None = None) -> _c.Connection:
+        """Re-implemented version of the Listener.accept from
+        multiprocessing.connection with the timeout option.
+        """
+        if self._listener is None:  # type: ignore[attr-defined]
+            raise OSError("listener is closed")
+
+        c = self._listener.accept()  # type: ignore[attr-defined]
+        if self._authkey is not None:  # type: ignore[attr-defined]
+            deliver_challenge(c, self._authkey, timeout=timeout)  # type: ignore[attr-defined]
+            answer_challenge(c, self._authkey, timeout=timeout)  # type: ignore[attr-defined]
+        return c  # type: ignore[no-any-return]
 
 
 def dispatch(
-    c: connection.Connection,
+    c: _c.Connection,
     name: str,
     args: tuple[Any, ...] = (),
     kwds: dict[str, Any] = {},  # noqa: B006
@@ -155,9 +250,7 @@ def conn_and_dispatch(
     exc = None
     rv = None
     try:
-        _debug(f"!! Connecting to {address}")
-        conn = connection.Client(address, authkey=authkey)
-        _debug(f"!! Connected to {address}")
+        conn = Client(address, authkey=authkey, timeout=timeout)
         rv = dispatch(conn, name, args, kwds, timeout)
     except Exception as e:
         exc = e
@@ -225,7 +318,7 @@ class _Server:
     ) -> None:
         listener = None
         try:
-            listener = connection.Listener(address=address, backlog=128)
+            listener = _c.Listener(address=address, backlog=128)
             try:
                 if on_start:
                     on_start.set()
@@ -253,22 +346,22 @@ class _Server:
                 except Exception as e:
                     _info(f"Failed to close listener: {e!r}")
 
-    def handle_request(self, conn: connection.Connection) -> None:
+    def handle_request(self, c: _c.Connection) -> None:
         """Handle a new connection"""
         try:
-            self._handle_request(conn)
+            self._handle_request(c)
         except SystemExit:
             _info("SystemExit in server")
             pass
         finally:
-            conn.close()
+            c.close()
         _debug("Connection closed")
 
-    def _handle_request(self, c: connection.Connection) -> None:
+    def _handle_request(self, c: _c.Connection) -> None:
         request = None
         try:
-            connection.deliver_challenge(c, self._authkey)
-            connection.answer_challenge(c, self._authkey)
+            deliver_challenge(c, self._authkey)
+            answer_challenge(c, self._authkey)
             request = c.recv()
             _ignore, funcname, args, kwds = request
             assert funcname in self.public, f"{funcname!r} unrecognized"
@@ -315,7 +408,7 @@ class Manager(_Server):
         authkey = process.current_process().authkey if authkey is None else authkey
         self._authkey = AuthenticationString(authkey)
 
-        self._Listener, self._Client = connection.Listener, connection.Client
+        self._Listener, self._Client = _c.Listener, Client
 
         self._registry_callback: dict[str, Callable] = {}
         self._registry_address: dict[str, _Address] = {}
@@ -378,19 +471,9 @@ class Manager(_Server):
 
     def _dummy2(self, timeout: Union[float, None] = None) -> Exception | None:
         """Make a dummy call to the server to make sure it is running"""
-        if timeout is None:
-            # We must have a timeout here to avoid deadlock
-            timeout = 0.25
-
-        # We have to work around a possible deadlock in multiprocessing.connection.Client
-        # by trying to connect without authkey first. We then skip the buggy part of the Client
-        # and raise an UnpicklingError in the return. If that happens we can retry with the
-        # actual authkey. This is a bit hacky but it works. Its ok since we do it only on _dummy
-        # calls..?
-
-        _, exc = conn_and_dispatch(self._address, None, "_dummy", timeout=timeout)
-        if exc and isinstance(exc, UnpicklingError):
-            _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy", timeout=timeout)
+        # We must have a timeout here to avoid deadlock
+        timeout = 0.25 if timeout is None else timeout
+        _, exc = conn_and_dispatch(self._address, self._authkey, "_dummy", timeout=timeout)
         return exc
 
     def register(self, name: str, callable: Callable) -> bool:
@@ -457,21 +540,21 @@ class Manager(_Server):
 
     public = ("_dummy", "_call", "_register", "_call2")
 
-    def _dummy(self, c: connection.Connection) -> None:
+    def _dummy(self, c: _c.Connection) -> None:
         pass
 
-    def _call(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+    def _call(self, c: _c.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by the server to call a callback"""
         _debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
         if name not in self._registry_callback:
             raise ValueError(f"Callback {name!r} not found")
         return self._registry_callback[name](*args, **kwds)  # type: ignore
 
-    def _call2(self, c: connection.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+    def _call2(self, c: _c.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by proxies and connected manager to call a callback"""
         return self.call(name, *args, **kwds)
 
-    def _register(self, c: connection.Connection, name: str, address: _Address) -> None:
+    def _register(self, c: _c.Connection, name: str, address: _Address) -> None:
         """Called by the client to register a callback. Proxy needs another lever of indirection because
         it does not hold the registry of callbacks."""
         _debug(f"Server registering '{name}' at {address}")
@@ -498,7 +581,7 @@ class ManagerProxy:
     def __init__(self, address: _Address, authkey: bytes) -> None:
         self._address = address
         self._authkey = bytes(authkey) if authkey is not None else None
-        self._Client = connection.Client
+        self._Client = Client
 
     def call(self, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Attempt to call a callback on the server"""
