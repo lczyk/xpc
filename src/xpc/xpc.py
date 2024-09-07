@@ -82,7 +82,7 @@ _T = TypeVar("_T", bound=Callable)
 
 _Address = Union[tuple[str, int], str]
 
-__version__ = "0.7.8"
+__version__ = "0.7.7"
 
 __all__ = ["Manager", "find_free_port"]
 
