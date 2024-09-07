@@ -133,7 +133,7 @@ def deliver_challenge(
     conn: _c.Connection,
     authkey: bytes,
     digest_name: str = "sha256",
-    timeout: float | None = None,
+    timeout: Optional[float] = None,
 ) -> None:
     """Re-implementation of the deliver_challenge function from multiprocessing.connection, with the
     timeout on conn.recv_bytes."""
@@ -162,7 +162,7 @@ def deliver_challenge(
 def answer_challenge(
     conn: _c.Connection,
     authkey: bytes,
-    timeout: float | None = None,
+    timeout: Optional[float] = None,
 ) -> None:
     """Re-implementation of the answer_challenge function from multiprocessing.connection with the
     timeout on conn.recv_bytes."""
@@ -188,8 +188,8 @@ def answer_challenge(
 @no_type_check
 def Client(
     address: _Address,
-    authkey: bytes | None = None,
-    timeout: float | None = None,
+    authkey: Optional[bytes] = None,
+    timeout: Optional[float] = None,
 ) -> _c.Connection:
     """Re-implemented version of the Client function from multiprocessing.connection with the timeout
     option."""
@@ -205,20 +205,63 @@ def Client(
     return c
 
 
-class Listener(_c.Listener):
-    @override
-    def accept(self, timeout: float | None = None) -> _c.Connection:
+class Listener:
+    """Returns a listener object.
+
+    This is a wrapper for a bound socket which is 'listening' for
+    connections, or for a Windows named pipe.
+    """
+
+    def __init__(
+        self,
+        address: _Address,
+        backlog: int = 1,
+        authkey: Optional[bytes] = None,
+    ) -> None:
+        family = _c.address_type(address)  # type: ignore[attr-defined]
+        if family == "AF_PIPE":
+            self._listener = _c.PipeListener(address, backlog)  # type: ignore[attr-defined]
+        else:
+            self._listener = _c.SocketListener(address, family, backlog)  # type: ignore[attr-defined]
+
+        if authkey is not None and not isinstance(authkey, bytes):
+            raise TypeError("authkey should be a byte string")
+
+        self._authkey = authkey
+
+    def accept(self, timeout: Optional[float] = None) -> _c.Connection:
         """Re-implemented version of the Listener.accept from
         multiprocessing.connection with the timeout option.
         """
-        if self._listener is None:  # type: ignore[attr-defined]
+        if self._listener is None:
             raise OSError("listener is closed")
 
-        c = self._listener.accept()  # type: ignore[attr-defined]
-        if self._authkey is not None:  # type: ignore[attr-defined]
-            deliver_challenge(c, self._authkey, timeout=timeout)  # type: ignore[attr-defined]
-            answer_challenge(c, self._authkey, timeout=timeout)  # type: ignore[attr-defined]
+        c = self._listener.accept()
+        if self._authkey is not None:
+            deliver_challenge(c, self._authkey, timeout=timeout)
+            answer_challenge(c, self._authkey, timeout=timeout)
         return c  # type: ignore[no-any-return]
+
+    def close(self) -> None:
+        """Close the bound socket or named pipe of `self`."""
+        listener = self._listener
+        if listener is not None:
+            self._listener = None
+            listener.close()
+
+    @property
+    def address(self) -> _Address:
+        return self._listener._address  # type: ignore[no-any-return]
+
+    @property
+    def last_accepted(self) -> _c.Connection:
+        return self._listener._last_accepted  # type: ignore[no-any-return]
+
+    def __enter__(self) -> "Listener":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, exc_tb: object) -> None:
+        self.close()
 
 
 def dispatch(
@@ -226,7 +269,7 @@ def dispatch(
     name: str,
     args: tuple[Any, ...] = (),
     kwds: dict[str, Any] = {},  # noqa: B006
-    timeout: float | None = None,
+    timeout: Optional[float] = None,
 ) -> Any:
     """Send a message to manager using connection `c` and return response"""
     c.send((None, name, args, kwds))
@@ -240,11 +283,11 @@ def dispatch(
 
 def conn_and_dispatch(
     address: _Address,
-    authkey: bytes | None,
+    authkey: Optional[bytes],
     name: str,
     args: tuple[Any, ...] = (),
     kwds: dict[str, Any] = {},  # noqa: B006
-    timeout: float | None = None,
+    timeout: Optional[float] = None,
 ) -> tuple[Any, Optional[Exception]]:
     conn = None
     exc = None
@@ -469,7 +512,7 @@ class Manager(_Server):
                     raise
                 self.start_or_connect(_depth=_depth + 1)
 
-    def _dummy2(self, timeout: Union[float, None] = None) -> Exception | None:
+    def _dummy2(self, timeout: Union[float, None] = None) -> Optional[Exception]:
         """Make a dummy call to the server to make sure it is running"""
         # We must have a timeout here to avoid deadlock
         timeout = 0.25 if timeout is None else timeout

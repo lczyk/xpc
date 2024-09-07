@@ -1,12 +1,13 @@
-from multiprocessing.connection import Listener
+import threading
+import time
+from multiprocessing.connection import AuthenticationError  # type: ignore[attr-defined]
+from typing import Optional
 
 import pytest
 from conftest import Subtests
-import threading
-import time
+
 from xpc import Manager, find_free_port
 from xpc.xpc import Client, Listener
-from multiprocessing.connection import AuthenticationError
 
 
 def check_address(address: tuple) -> bool:
@@ -50,10 +51,10 @@ def test_black_hole_with_timeout(subtests: Subtests) -> None:
 
 
 def _test_listener_client_passwords(
-    lauthkey: bytes | None,
-    cauthkey: bytes | None,
-    timeout: float | None = None,
-) -> tuple[Exception | None, Exception | None, list]:
+    lauthkey: Optional[bytes],
+    cauthkey: Optional[bytes],
+    timeout: Optional[float] = None,
+) -> tuple[Optional[Exception], Optional[Exception], list]:
     address = ("localhost", find_free_port())
 
     thread_exc = None
@@ -137,19 +138,43 @@ def test_listener_has_no_password_timeout() -> None:
     assert got == []
 
 
-# if __name__ == "__main__":
-#     print(" no passwords ".center(40, "-"))
-#     print(_test(listener=None, client=None))
+def _test_listener_deadlock(timeout: Optional[float] = None) -> tuple[Optional[Exception], bool]:
+    address = ("localhost", find_free_port())
 
-#     print(" two matching passwords ".center(40, "-"))
-#     print(_test(listener="password", client="password"))
+    thread_exc = None
+    got_past_accept = False
 
-#     print(" client has wrong password ".center(40, "-"))
-#     print(_test(listener="password", client="wrong"))
+    def target() -> None:
+        try:
+            with Listener(address, authkey=b"password") as listener:
+                try:
+                    listener.accept(timeout=timeout)
+                except TimeoutError:
+                    pass
+                nonlocal got_past_accept
+                got_past_accept = True
+        except Exception as e:
+            nonlocal thread_exc
+            thread_exc = e
 
-#     print(" client has no password ".center(40, "-"))
-#     print(_test(listener="password", client=None))
+    t = threading.Thread(target=target)
+    t.start()
 
-#     # This is the case which deadlocks
-#     print(" listener has no password ".center(40, "-"))
-#     print(_test(listener=None, client="password"))
+    with Client(address, authkey=None, timeout=timeout):
+        time.sleep(1.0)
+
+    t.join()
+
+    return thread_exc, got_past_accept
+
+
+def test_listener_deadlock() -> None:
+    te, got = _test_listener_deadlock(None)
+    assert te is not None
+    assert not got
+
+
+def test_listener_deadlock_timeout() -> None:
+    te, got = _test_listener_deadlock(0.25)
+    assert te is None
+    assert got
