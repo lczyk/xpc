@@ -11,6 +11,12 @@ sys.path.append(str(__project_root / "src"))
 
 from _server_fixture import *  # noqa: E402, F403
 
+
+@pytest.fixture(autouse=True)
+def verbosity(request: pytest.FixtureRequest) -> int:
+    return request.config.option.verbose
+
+
 ##========================================================================================================
 ##
 ##   ####  ##   ##  #####  ######  ######   ####  ######  ####
