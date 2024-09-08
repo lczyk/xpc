@@ -4,8 +4,6 @@ from multiprocessing.connection import AuthenticationError  # type: ignore[attr-
 from typing import Optional
 
 import pytest
-from conftest import Subtests
-
 from xpc import Manager, find_free_port
 from xpc.xpc import Client, Listener
 
@@ -22,7 +20,8 @@ def check_address(address: tuple) -> bool:
     return True
 
 
-def test_black_hole_with_timeout(subtests: Subtests) -> None:
+@pytest.mark.parametrize("timeout", [None, 1.0])
+def test_black_hole_with_timeout(timeout: Optional[float]) -> None:
     port = find_free_port()
     address = ("localhost", port)
     password = b"password"
@@ -37,17 +36,15 @@ def test_black_hole_with_timeout(subtests: Subtests) -> None:
 
     # We should *not* deadlock when the address is already in use
     # but not responding
-    for timeout in [1.0, None]:
-        with (
-            subtests.test(timeout=timeout),
-            pytest.raises(TimeoutError),
-            Listener(address, authkey=password),
-        ):
-            man = Manager(
-                address=address,
-                authkey=password,
-            )
-            man.connect(timeout=timeout)
+    with (
+        pytest.raises(TimeoutError),
+        Listener(address, authkey=password),
+    ):
+        man = Manager(
+            address=address,
+            authkey=password,
+        )
+        man.connect(timeout=timeout)
 
 
 def _test_listener_client_passwords(

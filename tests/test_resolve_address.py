@@ -1,7 +1,6 @@
 import sys
 
 import pytest
-
 from xpc.xpc import resolve_address
 
 

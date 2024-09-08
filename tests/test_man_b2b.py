@@ -1,7 +1,6 @@
 from typing import Optional
 
 import pytest
-
 from xpc import Manager
 
 

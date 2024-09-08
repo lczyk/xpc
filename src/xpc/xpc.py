@@ -67,6 +67,7 @@ import socket
 import threading
 import traceback
 from multiprocessing import connection as _c
+from multiprocessing.connection import Connection, AuthenticationError  # type: ignore
 from multiprocessing import process, util
 from multiprocessing.managers import convert_to_error as _convert_to_error  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
@@ -128,9 +129,39 @@ def resolve_address(
     return address, family
 
 
-@no_type_check
+_MESSAGE_LENGTH = 40
+_MD5ONLY_MESSAGE_LENGTH = 20
+_CHALLENGE = b"#CHALLENGE#"
+_WELCOME = b"#WELCOME#"
+_FAILURE = b"#FAILURE#"
+
+
+def _verify_challenge(authkey: bytes, message: bytes, response: bytes) -> None:
+    """Verify MAC challenge
+
+    If our message did not include a digest_name prefix, the client is allowed
+    to select a stronger digest_name from _ALLOWED_DIGESTS.
+
+    In case our message is prefixed, a client cannot downgrade to a weaker
+    algorithm, because the MAC is calculated over the entire message
+    including the '{digest_name}' prefix.
+    """
+    import hmac
+
+    response_digest, response_mac = _get_digest_name_and_payload(response)
+    response_digest = response_digest or "md5"
+    try:
+        expected = hmac.new(authkey, message, response_digest).digest()
+    except ValueError:
+        raise AuthenticationError(f"{response_digest=} unsupported")
+    if len(expected) != len(response_mac):
+        raise AuthenticationError(f"expected {response_digest!r} of length {len(expected)} " f"got {len(response_mac)}")
+    if not hmac.compare_digest(expected, response_mac):
+        raise AuthenticationError("digest received was wrong")
+
+
 def deliver_challenge(
-    conn: _c.Connection,
+    conn: Connection,
     authkey: bytes,
     digest_name: str = "sha256",
     timeout: Optional[float] = None,
@@ -139,28 +170,89 @@ def deliver_challenge(
     timeout on conn.recv_bytes."""
     if not isinstance(authkey, bytes):
         raise ValueError(f"Authkey must be bytes, not {type(authkey)!s}")
-    assert _c.MESSAGE_LENGTH > _c._MD5ONLY_MESSAGE_LENGTH, "protocol constraint"
-    message = os.urandom(_c.MESSAGE_LENGTH)
+    assert _MESSAGE_LENGTH >= _MD5ONLY_MESSAGE_LENGTH, "protocol constraint"
+    message = os.urandom(_MESSAGE_LENGTH)
     message = b"{%s}%s" % (digest_name.encode("ascii"), message)
     # Even when sending a challenge to a legacy client that does not support
     # digest prefixes, they'll take the entire thing as a challenge and
     # respond to it with a raw HMAC-MD5.
-    conn.send_bytes(_c._CHALLENGE + message)
+    conn.send_bytes(_CHALLENGE + message)
     if timeout is not None and not conn.poll(timeout):
         raise TimeoutError("Connection timed out")
     response = conn.recv_bytes(256)  # reject large message
     try:
-        _c._verify_challenge(authkey, message, response)
-    except _c.AuthenticationError:
-        conn.send_bytes(_c._FAILURE)
+        _verify_challenge(authkey, message, response)
+    except AuthenticationError:
+        conn.send_bytes(_FAILURE)
         raise
     else:
-        conn.send_bytes(_c._WELCOME)
+        conn.send_bytes(_WELCOME)
 
 
-@no_type_check
+_MD5ONLY_MESSAGE_LENGTH = 20
+_MD5_DIGEST_LEN = 16
+_LEGACY_LENGTHS = (_MD5ONLY_MESSAGE_LENGTH, _MD5_DIGEST_LEN)
+
+_ALLOWED_DIGESTS = frozenset({b"md5", b"sha256", b"sha384", b"sha3_256", b"sha3_384"})
+_MAX_DIGEST_LEN = max(len(_) for _ in _ALLOWED_DIGESTS)
+
+
+def _get_digest_name_and_payload(message: bytes) -> tuple[str, bytes]:
+    """Returns a digest name and the payload for a response hash.
+
+    If a legacy protocol is detected based on the message length
+    or contents the digest name returned will be empty to indicate
+    legacy mode where MD5 and no digest prefix should be sent.
+    """
+    # modern message format: b"{digest}payload" longer than 20 bytes
+    # legacy message format: 16 or 20 byte b"payload"
+    if len(message) in _LEGACY_LENGTHS:
+        # Either this was a legacy server challenge, or we're processing
+        # a reply from a legacy client that sent an unprefixed 16-byte
+        # HMAC-MD5 response. All messages using the modern protocol will
+        # be longer than either of these lengths.
+        return "", message
+    if message.startswith(b"{") and (curly := message.find(b"}", 1, _MAX_DIGEST_LEN + 2)) > 0:
+        digest = message[1:curly]
+        if digest in _ALLOWED_DIGESTS:
+            payload = message[curly + 1 :]
+            return digest.decode("ascii"), payload
+    raise AuthenticationError(
+        "unsupported message length, missing digest prefix, " f"or unsupported digest: {message=}"
+    )
+
+
+def _create_response(authkey: bytes, message: bytes) -> bytes:
+    """Create a MAC based on authkey and message
+
+    The MAC algorithm defaults to HMAC-MD5, unless MD5 is not available or
+    the message has a '{digest_name}' prefix. For legacy HMAC-MD5, the response
+    is the raw MAC, otherwise the response is prefixed with '{digest_name}',
+    e.g. b'{sha256}abcdefg...'
+
+    Note: The MAC protects the entire message including the digest_name prefix.
+    """
+    import hmac
+
+    digest_name = _get_digest_name_and_payload(message)[0]
+    # The MAC protects the entire message: digest header and payload.
+    if not digest_name:
+        # Legacy server without a {digest} prefix on message.
+        # Generate a legacy non-prefixed HMAC-MD5 reply.
+        try:
+            return hmac.new(authkey, message, "md5").digest()
+        except ValueError:
+            # HMAC-MD5 is not available (FIPS mode?), fall back to
+            # HMAC-SHA2-256 modern protocol. The legacy server probably
+            # doesn't support it and will reject us anyways. :shrug:
+            digest_name = "sha256"
+    # Modern protocol, indicate the digest used in the reply.
+    response = hmac.new(authkey, message, digest_name).digest()
+    return b"{%s}%s" % (digest_name.encode("ascii"), response)
+
+
 def answer_challenge(
-    conn: _c.Connection,
+    conn: Connection,
     authkey: bytes,
     timeout: Optional[float] = None,
 ) -> None:
@@ -171,18 +263,18 @@ def answer_challenge(
     if timeout is not None and not conn.poll(timeout):
         raise TimeoutError("Connection timed out")
     message = conn.recv_bytes(256)  # reject large message
-    if not message.startswith(_c._CHALLENGE):
-        raise _c.AuthenticationError(f"Protocol error, expected challenge: {message=}")
-    message = message[len(_c._CHALLENGE) :]
-    if len(message) < _c._MD5ONLY_MESSAGE_LENGTH:
-        raise _c.AuthenticationError("challenge too short: {len(message)} bytes")
-    digest = _c._create_response(authkey, message)
+    if not message.startswith(_CHALLENGE):
+        raise AuthenticationError(f"Protocol error, expected challenge: {message=}")
+    message = message[len(_CHALLENGE) :]
+    if len(message) < _MD5ONLY_MESSAGE_LENGTH:
+        raise AuthenticationError("challenge too short: {len(message)} bytes")
+    digest = _create_response(authkey, message)
     conn.send_bytes(digest)
     if timeout is not None and not conn.poll(timeout):
         raise TimeoutError("Connection timed out")
     response = conn.recv_bytes(256)  # reject large message
-    if response != _c._WELCOME:
-        raise _c.AuthenticationError("digest sent was rejected")
+    if response != _WELCOME:
+        raise AuthenticationError("digest sent was rejected")
 
 
 @no_type_check
@@ -190,7 +282,7 @@ def Client(
     address: _Address,
     authkey: Optional[bytes] = None,
     timeout: Optional[float] = None,
-) -> _c.Connection:
+) -> Connection:
     """Re-implemented version of the Client function from multiprocessing.connection with the timeout
     option."""
     c = _c.PipeClient(address) if _c.address_type(address) == "AF_PIPE" else _c.SocketClient(address)
@@ -229,7 +321,7 @@ class Listener:
 
         self._authkey = authkey
 
-    def accept(self, timeout: Optional[float] = None) -> _c.Connection:
+    def accept(self, timeout: Optional[float] = None) -> Connection:
         """Re-implemented version of the Listener.accept from
         multiprocessing.connection with the timeout option.
         """
@@ -254,7 +346,7 @@ class Listener:
         return self._listener._address  # type: ignore[no-any-return]
 
     @property
-    def last_accepted(self) -> _c.Connection:
+    def last_accepted(self) -> Connection:
         return self._listener._last_accepted  # type: ignore[no-any-return]
 
     def __enter__(self) -> "Listener":
@@ -265,7 +357,7 @@ class Listener:
 
 
 def dispatch(
-    c: _c.Connection,
+    c: Connection,
     name: str,
     args: tuple[Any, ...] = (),
     kwds: dict[str, Any] = {},  # noqa: B006
@@ -389,7 +481,7 @@ class _Server:
                 except Exception as e:
                     _info(f"Failed to close listener: {e!r}")
 
-    def handle_request(self, c: _c.Connection) -> None:
+    def handle_request(self, c: Connection) -> None:
         """Handle a new connection"""
         try:
             self._handle_request(c)
@@ -400,7 +492,7 @@ class _Server:
             c.close()
         _debug("Connection closed")
 
-    def _handle_request(self, c: _c.Connection) -> None:
+    def _handle_request(self, c: Connection) -> None:
         request = None
         try:
             deliver_challenge(c, self._authkey)
@@ -583,21 +675,21 @@ class Manager(_Server):
 
     public = ("_dummy", "_call", "_register", "_call2")
 
-    def _dummy(self, c: _c.Connection) -> None:
+    def _dummy(self, c: Connection) -> None:
         pass
 
-    def _call(self, c: _c.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+    def _call(self, c: Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by the server to call a callback"""
         _debug(f"Client calling '{name}' with args: {args} and kwargs: {kwds}")
         if name not in self._registry_callback:
             raise ValueError(f"Callback {name!r} not found")
         return self._registry_callback[name](*args, **kwds)  # type: ignore
 
-    def _call2(self, c: _c.Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
+    def _call2(self, c: Connection, name: str, /, *args: Any, **kwds: Any) -> tuple[Any, bool]:
         """Called by proxies and connected manager to call a callback"""
         return self.call(name, *args, **kwds)
 
-    def _register(self, c: _c.Connection, name: str, address: _Address) -> None:
+    def _register(self, c: Connection, name: str, address: _Address) -> None:
         """Called by the client to register a callback. Proxy needs another lever of indirection because
         it does not hold the registry of callbacks."""
         _debug(f"Server registering '{name}' at {address}")
