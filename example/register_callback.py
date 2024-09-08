@@ -8,6 +8,7 @@ sys.path.append(str(__project_root__ / "src"))
 from typing import Any
 
 from _logging import setup_logging
+
 from xpc import Manager
 
 if __name__ == "__main__":

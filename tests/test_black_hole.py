@@ -1,12 +1,18 @@
 import threading
 import time
+import traceback
 from multiprocessing.connection import AuthenticationError  # type: ignore[attr-defined]
 from typing import Optional
-import traceback
 
 import pytest
+
 from xpc import Manager, find_free_port
 from xpc.xpc import Client, Listener
+
+
+@pytest.fixture()
+def print_traceback(verbosity: int) -> bool:
+    return verbosity > 1
 
 
 def check_address(address: tuple) -> bool:
@@ -61,6 +67,7 @@ def _test_listener_client_passwords(
     client_exc = None
 
     stop = threading.Event()
+    on_stop = threading.Event()
 
     def target() -> None:
         try:
@@ -78,6 +85,8 @@ def _test_listener_client_passwords(
                 traceback.print_exc()
             nonlocal thread_exc
             thread_exc = e
+        finally:
+            on_stop.set()
 
     t = threading.Thread(target=target)
     t.start()
@@ -97,26 +106,27 @@ def _test_listener_client_passwords(
     finally:
         stop.set()
         t.join()
+        on_stop.wait()
 
     return thread_exc, client_exc, thread_got
 
 
-def test_no_passwords(verbosity: int) -> None:
-    te, ce, got = _test_listener_client_passwords(None, None, print_traceback=verbosity > 1)
+def test_no_passwords(print_traceback: bool) -> None:
+    te, ce, got = _test_listener_client_passwords(None, None, print_traceback)
     assert te is None
     assert ce is None
     assert got == ["hello"]
 
 
-def test_two_matching_passwords(verbosity: int) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", b"password", print_traceback=verbosity > 1)
+def test_two_matching_passwords(print_traceback: bool) -> None:
+    te, ce, got = _test_listener_client_passwords(b"password", b"password", print_traceback)
     assert te is None
     assert ce is None
     assert got == ["hello"]
 
 
-def test_client_has_wrong_password(verbosity: int) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", b"wrong", print_traceback=verbosity > 1)
+def test_client_has_wrong_password(print_traceback: bool) -> None:
+    te, ce, got = _test_listener_client_passwords(b"password", b"wrong", print_traceback)
     assert isinstance(te, AuthenticationError)
     assert str(te) == "digest received was wrong"
     assert isinstance(ce, AuthenticationError)
@@ -124,20 +134,20 @@ def test_client_has_wrong_password(verbosity: int) -> None:
     assert got == []
 
 
-def test_client_has_no_password(verbosity: int) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", None, print_traceback=verbosity > 1)
+def test_client_has_no_password(print_traceback: bool) -> None:
+    te, ce, got = _test_listener_client_passwords(b"password", None, print_traceback)
     assert isinstance(te, AuthenticationError)
     assert ce is None
     assert got == []
 
 
 @pytest.mark.skip(reason="deadlocks")
-def test_listener_has_no_password(verbosity: int) -> None:
-    _test_listener_client_passwords(None, b"password")
+def test_listener_has_no_password(print_traceback: bool) -> None:
+    _test_listener_client_passwords(None, b"password", print_traceback)
 
 
-def test_listener_has_no_password_timeout(verbosity: int) -> None:
-    te, ce, got = _test_listener_client_passwords(None, b"password", timeout=0.25, print_traceback=verbosity > 1)
+def test_listener_has_no_password_timeout(print_traceback: bool) -> None:
+    te, ce, got = _test_listener_client_passwords(None, b"password", 0.25, print_traceback)
     assert te is None
     assert isinstance(ce, TimeoutError)
     assert got == []
@@ -179,13 +189,13 @@ def _test_listener_deadlock(
     return thread_exc, got_past_accept
 
 
-def test_listener_deadlock(verbosity: int) -> None:
-    te, got = _test_listener_deadlock(None, print_traceback=verbosity > 1)
+def test_listener_deadlock(print_traceback: bool) -> None:
+    te, got = _test_listener_deadlock(None, print_traceback)
     assert te is not None
     assert not got
 
 
-def test_listener_deadlock_timeout(verbosity: int) -> None:
-    te, got = _test_listener_deadlock(0.25, print_traceback=verbosity > 1)
+def test_listener_deadlock_timeout(print_traceback: bool) -> None:
+    te, got = _test_listener_deadlock(0.25, print_traceback)
     assert te is None
     assert got

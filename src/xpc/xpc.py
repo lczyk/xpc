@@ -67,8 +67,8 @@ import socket
 import threading
 import traceback
 from multiprocessing import connection as _c
-from multiprocessing.connection import Connection, AuthenticationError  # type: ignore
 from multiprocessing import process, util
+from multiprocessing.connection import AuthenticationError, Connection  # type: ignore
 from multiprocessing.managers import convert_to_error as _convert_to_error  # type: ignore
 from multiprocessing.process import AuthenticationString  # type: ignore
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, no_type_check
@@ -153,7 +153,7 @@ def _verify_challenge(authkey: bytes, message: bytes, response: bytes) -> None:
     try:
         expected = hmac.new(authkey, message, response_digest).digest()
     except ValueError:
-        raise AuthenticationError(f"{response_digest=} unsupported")
+        raise AuthenticationError(f"{response_digest=} unsupported") from None
     if len(expected) != len(response_mac):
         raise AuthenticationError(f"expected {response_digest!r} of length {len(expected)} " f"got {len(response_mac)}")
     if not hmac.compare_digest(expected, response_mac):
@@ -285,7 +285,10 @@ def Client(
 ) -> Connection:
     """Re-implemented version of the Client function from multiprocessing.connection with the timeout
     option."""
-    c = _c.PipeClient(address) if _c.address_type(address) == "AF_PIPE" else _c.SocketClient(address)
+    if _c.address_type(address) == "AF_PIPE":  # noqa: SIM108
+        c = _c.PipeClient(address)
+    else:
+        c = _c.SocketClient(address)
 
     if authkey is not None and not isinstance(authkey, bytes):
         raise TypeError("authkey should be a byte string")
