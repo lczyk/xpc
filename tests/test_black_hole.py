@@ -57,12 +57,13 @@ def test_black_hole_with_timeout(timeout: Optional[float]) -> None:
 def _test_listener_client_passwords(
     lauthkey: Optional[bytes],
     cauthkey: Optional[bytes],
+    *,
     timeout: Optional[float] = None,
     print_traceback: bool = False,
 ) -> tuple[Optional[Exception], Optional[Exception], list]:
     address = ("localhost", find_free_port())
 
-    thread_exc = None
+    listener_exc = None
     thread_got = []
     client_exc = None
 
@@ -80,11 +81,8 @@ def _test_listener_client_passwords(
                             break
                         thread_got.append(value)
         except Exception as e:
-            if print_traceback:
-                print("Listener exception:")
-                traceback.print_exc()
-            nonlocal thread_exc
-            thread_exc = e
+            nonlocal listener_exc
+            listener_exc = e
         finally:
             on_stop.set()
 
@@ -98,9 +96,6 @@ def _test_listener_client_passwords(
             client.send(None)
 
     except Exception as e:
-        if print_traceback:
-            print("Client exception:")
-            traceback.print_exc()
         client_exc = e
 
     finally:
@@ -108,25 +103,33 @@ def _test_listener_client_passwords(
         t.join()
         on_stop.wait()
 
-    return thread_exc, client_exc, thread_got
+    if print_traceback:
+        if listener_exc:
+            print("Listener exception:")
+            traceback.print_exception(listener_exc)
+        if client_exc:
+            print("Client exception:")
+            traceback.print_exception(client_exc)
+
+    return listener_exc, client_exc, thread_got
 
 
 def test_no_passwords(print_traceback: bool) -> None:
-    te, ce, got = _test_listener_client_passwords(None, None, print_traceback)
+    te, ce, got = _test_listener_client_passwords(None, None, print_traceback=print_traceback)
     assert te is None
     assert ce is None
     assert got == ["hello"]
 
 
 def test_two_matching_passwords(print_traceback: bool) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", b"password", print_traceback)
+    te, ce, got = _test_listener_client_passwords(b"password", b"password", print_traceback=print_traceback)
     assert te is None
     assert ce is None
     assert got == ["hello"]
 
 
 def test_client_has_wrong_password(print_traceback: bool) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", b"wrong", print_traceback)
+    te, ce, got = _test_listener_client_passwords(b"password", b"wrong", print_traceback=print_traceback)
     assert isinstance(te, AuthenticationError)
     assert str(te) == "digest received was wrong"
     assert isinstance(ce, AuthenticationError)
@@ -135,7 +138,7 @@ def test_client_has_wrong_password(print_traceback: bool) -> None:
 
 
 def test_client_has_no_password(print_traceback: bool) -> None:
-    te, ce, got = _test_listener_client_passwords(b"password", None, print_traceback)
+    te, ce, got = _test_listener_client_passwords(b"password", None, print_traceback=print_traceback)
     assert isinstance(te, AuthenticationError)
     assert ce is None
     assert got == []
@@ -143,11 +146,11 @@ def test_client_has_no_password(print_traceback: bool) -> None:
 
 @pytest.mark.skip(reason="deadlocks")
 def test_listener_has_no_password(print_traceback: bool) -> None:
-    _test_listener_client_passwords(None, b"password", print_traceback)
+    _test_listener_client_passwords(None, b"password", print_traceback=print_traceback)
 
 
 def test_listener_has_no_password_timeout(print_traceback: bool) -> None:
-    te, ce, got = _test_listener_client_passwords(None, b"password", 0.25, print_traceback)
+    te, ce, got = _test_listener_client_passwords(None, b"password", timeout=0.25, print_traceback=print_traceback)
     assert te is None
     assert isinstance(ce, TimeoutError)
     assert got == []
@@ -159,7 +162,7 @@ def _test_listener_deadlock(
 ) -> tuple[Optional[Exception], bool]:
     address = ("localhost", find_free_port())
 
-    thread_exc = None
+    listener_exc = None
     got_past_accept = False
 
     def target() -> None:
@@ -175,8 +178,8 @@ def _test_listener_deadlock(
             if print_traceback:
                 print("Listener exception:")
                 traceback.print_exc()
-            nonlocal thread_exc
-            thread_exc = e
+            nonlocal listener_exc
+            listener_exc = e
 
     t = threading.Thread(target=target)
     t.start()
@@ -186,7 +189,7 @@ def _test_listener_deadlock(
 
     t.join()
 
-    return thread_exc, got_past_accept
+    return listener_exc, got_past_accept
 
 
 def test_listener_deadlock(print_traceback: bool) -> None:
