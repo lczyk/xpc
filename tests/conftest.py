@@ -14,7 +14,15 @@ from _server_fixture import *  # noqa: E402, F403
 
 @pytest.fixture(autouse=True)
 def verbosity(request: pytest.FixtureRequest) -> int:
-    return request.config.option.verbose
+    verbose: int
+    try:
+        _verbose = request.config.option.verbose
+        assert isinstance(_verbose, int)
+        verbose = _verbose
+    except Exception:
+        verbose = 0
+
+    return verbose
 
 
 ##========================================================================================================

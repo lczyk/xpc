@@ -1,6 +1,8 @@
+import sys
 import threading
 import time
 import traceback
+from contextlib import suppress
 from multiprocessing.connection import AuthenticationError  # type: ignore[attr-defined]
 from typing import Optional
 
@@ -68,11 +70,12 @@ def _test_listener_client_passwords(
     client_exc = None
 
     stop = threading.Event()
-    on_stop = threading.Event()
+    on_start = threading.Event()
 
     def target() -> None:
         try:
             with Listener(address, authkey=lauthkey) as listener:
+                on_start.set()
                 c = listener.accept(timeout=timeout)
                 while not stop.is_set():
                     if c.poll(timeout=timeout):
@@ -83,11 +86,11 @@ def _test_listener_client_passwords(
         except Exception as e:
             nonlocal listener_exc
             listener_exc = e
-        finally:
-            on_stop.set()
 
     t = threading.Thread(target=target)
     t.start()
+    with suppress(TimeoutError):
+        on_start.wait(1.0)
 
     try:
         with Client(address, authkey=cauthkey, timeout=timeout) as client:
@@ -100,16 +103,22 @@ def _test_listener_client_passwords(
 
     finally:
         stop.set()
-        t.join()
-        on_stop.wait()
+        with suppress(TimeoutError):
+            t.join(1.0)
 
     if print_traceback:
         if listener_exc:
             print("Listener exception:")
-            traceback.print_exception(listener_exc)
+            if sys.version_info >= (3, 10):
+                traceback.print_exception(listener_exc)
+            else:
+                traceback.print_exception(type(listener_exc), listener_exc, listener_exc.__traceback__)
         if client_exc:
             print("Client exception:")
-            traceback.print_exception(client_exc)
+            if sys.version_info >= (3, 10):
+                traceback.print_exception(client_exc)
+            else:
+                traceback.print_exception(type(client_exc), client_exc, client_exc.__traceback__)
 
     return listener_exc, client_exc, thread_got
 
@@ -165,9 +174,12 @@ def _test_listener_deadlock(
     listener_exc = None
     got_past_accept = False
 
+    on_start = threading.Event()
+
     def target() -> None:
         try:
             with Listener(address, authkey=b"password") as listener:
+                on_start.set()
                 try:
                     listener.accept(timeout=timeout)
                 except TimeoutError:
@@ -175,19 +187,27 @@ def _test_listener_deadlock(
                 nonlocal got_past_accept
                 got_past_accept = True
         except Exception as e:
-            if print_traceback:
-                print("Listener exception:")
-                traceback.print_exc()
             nonlocal listener_exc
             listener_exc = e
 
     t = threading.Thread(target=target)
     t.start()
 
+    with suppress(TimeoutError):
+        on_start.wait(1.0)
+
     with Client(address, authkey=None, timeout=timeout):
         time.sleep(1.0)
 
-    t.join()
+    with suppress(TimeoutError):
+        t.join(1.0)
+
+    if print_traceback and listener_exc:
+        print("Listener exception:")
+        if sys.version_info >= (3, 10):
+            traceback.print_exception(listener_exc)
+        else:
+            traceback.print_exception(type(listener_exc), listener_exc, listener_exc.__traceback__)
 
     return listener_exc, got_past_accept
 
