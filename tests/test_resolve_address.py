@@ -15,6 +15,7 @@ def test_resolve_address_af_inet() -> None:
     assert address == ("localhost", 0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Non-Windows only")
 def test_resolve_address_af_unix() -> None:
     _address, family = resolve_address(family="AF_UNIX")
     assert family == "AF_UNIX"
