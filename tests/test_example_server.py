@@ -1,7 +1,8 @@
 import signal
 import subprocess
 import sys
-import time
+from contextlib import suppress
+from threading import Event
 
 import pytest
 
@@ -57,14 +58,19 @@ def test_register_callback(server: subprocess.Popen) -> None:
 
     i = 0
 
+    called = Event()
+
     def my_callback(*args: object, **kwargs: object) -> None:
         nonlocal i
         i += 1
+        called.set()
 
     assert i == 0
 
     man.register("my_callback", my_callback)
 
-    time.sleep(0.1)  # Should be enough time for the server to call us
+    with suppress(TimeoutError):
+        called.wait(2.0)
 
+    assert called.is_set()
     assert i > 0
