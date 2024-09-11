@@ -1,10 +1,11 @@
 # xpc
 
+[![Single file](https://img.shields.io/badge/single%20file%20-%20purple)](https://raw.githubusercontent.com/MarcinKonowalczyk/xpc/main/src/xpc/xpc.py)
 [![test](https://github.com/MarcinKonowalczyk/xpc/actions/workflows/test.yml/badge.svg)](https://github.com/MarcinKonowalczyk/xpc/actions/workflows/test.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![Static Badge](https://img.shields.io/badge/python-3.9%20~%203.13-blue)
+![Python versions](https://img.shields.io/badge/python-3.9%20~%203.13-blue)
 
 Cross-process call library for Python.
 
