@@ -1,7 +1,7 @@
 """
 Single-file module for cross-process callbacks.
 
-Hosted at https://github.com/MarcinKonowalczyk/xpc
+Hosted at https://github.com/lczyk/xpc
 
 This module provides a simple way to register callbacks in one process and call them in another. The motivating
 use-case is to allow registering custom callbacks in an application during testing, or for dynamic instrumentation
@@ -155,7 +155,7 @@ def _verify_challenge(authkey: bytes, message: bytes, response: bytes) -> None:
     except ValueError:
         raise AuthenticationError(f"{response_digest=} unsupported") from None
     if len(expected) != len(response_mac):
-        raise AuthenticationError(f"expected {response_digest!r} of length {len(expected)} " f"got {len(response_mac)}")
+        raise AuthenticationError(f"expected {response_digest!r} of length {len(expected)} got {len(response_mac)}")
     if not hmac.compare_digest(expected, response_mac):
         raise AuthenticationError("digest received was wrong")
 
@@ -217,9 +217,7 @@ def _get_digest_name_and_payload(message: bytes) -> tuple[str, bytes]:
         if digest in _ALLOWED_DIGESTS:
             payload = message[curly + 1 :]
             return digest.decode("ascii"), payload
-    raise AuthenticationError(
-        "unsupported message length, missing digest prefix, " f"or unsupported digest: {message=}"
-    )
+    raise AuthenticationError(f"unsupported message length, missing digest prefix, or unsupported digest: {message=}")
 
 
 def _create_response(authkey: bytes, message: bytes) -> bytes:
